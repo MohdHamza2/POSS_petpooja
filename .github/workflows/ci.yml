@@ -35,7 +35,7 @@ jobs:
         image: redis:7
         ports: ['6379:6379']
     env:
-      DATABASE_URL: postgresql://pos:pos@localhost:5432/pos_test
+      DATABASE_URL: postgresql://pos:pos@127.0.0.1:5432/pos_test
       REDIS_URL: redis://localhost:6379
       JWT_SECRET: ci_jwt_secret_key_minimum_32_characters_long
       CREDENTIALS_ENCRYPTION_KEY: ci_only_channel_credentials_key_change_me
