@@ -35,26 +35,9 @@ if (fs.existsSync(envPath)) {
 
 const MIGRATIONS_DIR = path.join(__dirname, '..', 'db', 'migrations');
 const ROOT_DIR = path.join(__dirname, '..');
-const DEBUG_LOG = path.join(ROOT_DIR, 'debug-9c675b.log');
 
-function debugLog(hypothesisId, message, data) {
-  // #region agent log
-  const payload = {
-    sessionId: '9c675b',
-    hypothesisId,
-    location: 'scripts/db-migrate.js',
-    message,
-    data,
-    timestamp: Date.now(),
-    runId: process.env.CI === 'true' ? 'ci' : 'local',
-  };
-  try {
-    fs.appendFileSync(DEBUG_LOG, JSON.stringify(payload) + '\n');
-  } catch (_) {
-    /* ignore */
-  }
+function debugLog(_hypothesisId, message, data) {
   console.log(`[db:migrate] ${message}${data ? ' ' + JSON.stringify(data) : ''}`);
-  // #endregion
 }
 
 function isDuplicateSchemaError(err) {
