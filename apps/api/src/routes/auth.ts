@@ -338,11 +338,13 @@ router.get("/me", requireAuth, async (req: AuthedRequest, res) => {
       });
       outletData = {
         id: outlet.id,
+        code: outlet.code,
         name: outlet.name,
         address: (outlet as any).address || null,
         fssaiNumber: (outlet as any).fssaiNumber || null,
         upiVpa: (outlet as any).upiVpa || null,
         taxNumber: (organization as any)?.taxNumber || (organization as any)?.tax_id || null,
+        loyaltyPaisePerPoint: outlet.loyaltyPaisePerPoint != null ? outlet.loyaltyPaisePerPoint.toString() : null,
       };
     }
 

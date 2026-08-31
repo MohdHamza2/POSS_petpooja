@@ -239,6 +239,28 @@ describe("computeTableTurnaroundAverage", () => {
     expect(result.averageMinutes).toBe(40);
   });
 
+  it("excludes late-settled covers whose seat-to-settle span exceeds a service day", () => {
+    const rows: DineInTurnaroundRow[] = [
+      {
+        orderId: "o1",
+        orderType: "DINE_IN",
+        createdAt: new Date("2026-01-05T10:00:00Z"),
+        settledAt: new Date("2026-01-05T10:40:00Z"),
+      },
+      {
+        orderId: "o2",
+        orderType: "DINE_IN",
+        createdAt: new Date("2026-01-05T10:00:00Z"),
+        settledAt: new Date("2026-01-07T10:00:00Z"),
+      },
+    ];
+
+    const result = computeTableTurnaroundAverage(outletId, range, rows);
+
+    expect(result.qualifyingOrderCount).toBe(1);
+    expect(result.averageMinutes).toBe(40);
+  });
+
   it("excludes orders with no settled status (settledAt null)", () => {
     const rows: DineInTurnaroundRow[] = [
       {

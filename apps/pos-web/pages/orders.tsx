@@ -101,8 +101,8 @@ export default function OrdersPage() {
   const tab: Tab = tabParam === "all" || tabParam === "online" ? tabParam : "live";
 
   const outlet = me?.outlet ?? null;
-  const outletName = outlet?.name || (authLoading ? "Loading..." : "Hotel Kapila");
-  const outletCode = outlet?.taxNumber ? `R${outlet.taxNumber.slice(0, 6)}` : "R327038";
+  const outletName = outlet?.name || (authLoading ? "Loading..." : "Outlet");
+  const outletCode = outlet?.code || "";
 
   const [orders, setOrders] = useState<OrderSummaryDto[]>([]);
   const [loading, setLoading] = useState(true);

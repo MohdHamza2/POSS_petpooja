@@ -36,11 +36,13 @@ export interface StoredSession {
 
 export interface MeOutlet {
   id: string;
+  code?: string | null;
   name: string;
   address: string | null;
   fssaiNumber: string | null;
   upiVpa: string | null;
   taxNumber: string | null;
+  loyaltyPaisePerPoint?: string | null;
 }
 
 export interface MeResponse {
@@ -232,19 +234,66 @@ export async function switchOutlet(outletId: string): Promise<{ ok: true } | { o
   }
 }
 
+let refreshInFlight: Promise<boolean> | null = null;
+
+async function refreshAccessToken(): Promise<boolean> {
+  if (!isBrowser()) return false;
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = (async () => {
+    const full = getStoredSessionFull();
+    if (!full?.refreshToken) return false;
+    try {
+      const res = await fetch(`${getApiBase()}/auth/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refreshToken: full.refreshToken }),
+      });
+      if (!res.ok) return false;
+      const data = await res.json();
+      if (typeof data.accessToken !== "string") return false;
+      const next: StoredSession = {
+        ...full,
+        accessToken: data.accessToken,
+        expiresAt: typeof data.expiresAt === "string" ? data.expiresAt : full.expiresAt,
+        sessionId: decodeSessionIdFromToken(data.accessToken) ?? full.sessionId,
+      };
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      return true;
+    } catch {
+      return false;
+    }
+  })().finally(() => {
+    refreshInFlight = null;
+  });
+  return refreshInFlight;
+}
+
 export async function fetchMe(): Promise<MeResponse | null> {
   const session = getSession();
   if (!session) return null;
-  try {
-    const base = getApiBase();
-    const res = await fetch(`${base}/auth/me`, {
-      headers: { Authorization: `Bearer ${session.accessToken}` },
-    });
-    if (!res.ok) return null;
-    return (await res.json()) as MeResponse;
-  } catch {
+  const base = getApiBase();
+  const res = await fetch(`${base}/auth/me`, {
+    headers: { Authorization: `Bearer ${session.accessToken}` },
+  });
+  if (res.status === 401) {
+    if (await refreshAccessToken()) {
+      const session2 = getSession();
+      if (!session2) return null;
+      const res2 = await fetch(`${base}/auth/me`, {
+        headers: { Authorization: `Bearer ${session2.accessToken}` },
+      });
+      if (res2.status === 401) return null;
+      if (!res2.ok) {
+        throw new Error(`auth/me ${res2.status}`);
+      }
+      return (await res2.json()) as MeResponse;
+    }
     return null;
   }
+  if (!res.ok) {
+    throw new Error(`auth/me ${res.status}`);
+  }
+  return (await res.json()) as MeResponse;
 }
 
 // Verifies a terminal-unlock PIN against the real User.pinHash server-side
@@ -270,9 +319,12 @@ export async function verifyPin(pin: string): Promise<boolean> {
   }
 }
 
-export async function authedFetch(url: string, options: RequestInit = {}): Promise<Response> {
+type AuthedFetchOptions = RequestInit & { _retriedAfterRefresh?: boolean };
+
+export async function authedFetch(url: string, options: AuthedFetchOptions = {}): Promise<Response> {
+  const { _retriedAfterRefresh, ...fetchOptions } = options;
   const session = getSession();
-  const headers = new Headers(options.headers);
+  const headers = new Headers(fetchOptions.headers);
   if (session) {
     headers.set("Authorization", `Bearer ${session.accessToken}`);
     if (session.outletId && !headers.has("X-Outlet-Id")) {
@@ -280,15 +332,40 @@ export async function authedFetch(url: string, options: RequestInit = {}): Promi
     }
   }
 
-  if (options.body && typeof options.body === "string" && !headers.has("Content-Type")) {
+  if (fetchOptions.body && typeof fetchOptions.body === "string" && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
 
   const base = getApiBase();
   const finalUrl = url.startsWith("http://") || url.startsWith("https://") ? url : `${base}${url.startsWith("/") ? "" : "/"}${url}`;
-  const res = await fetch(finalUrl, { ...options, headers });
+  let res: Response;
+  try {
+    res = await fetch(finalUrl, { ...fetchOptions, headers });
+  } catch (err) {
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'K1',location:'auth.ts:authedFetch',message:'network error without wiping session',data:{url:finalUrl,err:String(err)},timestamp:Date.now(),runId:'cover-0029'})}).catch(()=>{});
+    // #endregion
+    return new Response(JSON.stringify({ error: "NETWORK_ERROR" }), {
+      status: 503,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
 
   if (res.status === 401) {
+    // #region agent log
+    const errBody = await res.clone().text().catch(() => "");
+    const full = getStoredSessionFull();
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'K2',location:'auth.ts:authedFetch',message:'401 received',data:{url:finalUrl,method:fetchOptions.method||'GET',hasSession:!!session,tokenLen:session?.accessToken?.length||0,expiresAt:full?.expiresAt||null,retried:Boolean(_retriedAfterRefresh),body:errBody.slice(0,240)},timestamp:Date.now(),runId:'cover-0029'})}).catch(()=>{});
+    // #endregion
+    if (!_retriedAfterRefresh && isBrowser() && full?.refreshToken) {
+      const refreshed = await refreshAccessToken();
+      // #region agent log
+      fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'K6',location:'auth.ts:authedFetch',message:'refresh after 401',data:{url:finalUrl,refreshed},timestamp:Date.now(),runId:'cover-0029'})}).catch(()=>{});
+      // #endregion
+      if (refreshed) {
+        return authedFetch(url, { ...fetchOptions, _retriedAfterRefresh: true });
+      }
+    }
     if (isBrowser()) {
       window.localStorage.removeItem(STORAGE_KEY);
       window.location.href = "/login";
@@ -314,6 +391,9 @@ export function useAuthGuard(requiredPermission?: string): { me: MeResponse | nu
     fetchMe().then((result) => {
       if (cancelled) return;
       if (!result) {
+        // #region agent log
+        fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'K1',location:'auth.ts:useAuthGuard',message:'auth/me 401 wiping session',data:{requiredPermission:requiredPermission||null},timestamp:Date.now(),runId:'cover-0029'})}).catch(()=>{});
+        // #endregion
         window.localStorage.removeItem(STORAGE_KEY);
         window.location.href = "/login";
         return;
@@ -336,6 +416,12 @@ export function useAuthGuard(requiredPermission?: string): { me: MeResponse | nu
         return;
       }
       setMe(result);
+      setLoading(false);
+    }).catch((err) => {
+      // #region agent log
+      fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'K1',location:'auth.ts:useAuthGuard',message:'auth/me failed without wiping session',data:{err:String(err),requiredPermission:requiredPermission||null},timestamp:Date.now(),runId:'cover-0029'})}).catch(()=>{});
+      // #endregion
+      if (cancelled) return;
       setLoading(false);
     });
 

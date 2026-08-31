@@ -64,10 +64,9 @@ export interface ChannelBreakdown {
 }
 
 // Table Turnaround Average (T.T.A) — for DINE_IN orders with a diningTableId,
-// the average time in minutes from order creation (Order.createdAt, a proxy
-// for seat/order-start) to the order's SETTLED status timestamp (a proxy for
-// clear-time), across all qualifying orders in range. Orders with no SETTLED
-// status row in OrderStatusHistory are excluded (table never cleared).
+// the average minutes from Order.createdAt (seat/KOT start) to settledAt
+// (clear-time). Covers with no settledAt are excluded. Covers whose span
+// exceeds 12 hours are treated as late-settled leakage, not table turns.
 export interface TableTurnaroundAverage {
   outletId: string;
   fromDate: Date;

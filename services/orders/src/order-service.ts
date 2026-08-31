@@ -136,6 +136,7 @@ export interface OrderDetail extends OrderSummary {
   terminalNumber: string;
   diningTableId: string | null;
   customerId: string | null;
+  customerPhone: string | null;
   items: {
     id: string;
     menuItemId: string;
@@ -208,6 +209,7 @@ export function priceOrder(
       modifiers,
       course: line.course,
       seatNumber: line.seatNumber,
+      notes: line.notes,
     });
     subtotalMinor += lineSubtotalMinor;
     taxTotalMinor += lineTaxMinor;

@@ -32,8 +32,14 @@ const QUEUED_KOT_STATUSES = new Set(["QUEUED", "KOT_CREATED", "PENDING"]);
 const COOKING_KOT_STATUSES = new Set(["PREPARING", "IN_PREPARATION", "COOKING"]);
 
 function isLiveFloorSession(order: any): boolean {
+  if (order.advanceStatus === "HELD") return false;
   const kots = order.kotTickets || [];
   const items = order.orderItems || [];
+  const unserved = kots.some(
+    (k: any) => k.status !== "CANCELLED" && k.status !== "SERVED"
+  );
+  if (order.status === "COMPLETED") return unserved;
+  if (unserved) return true;
   if (kots.some((k: any) => k.status !== "CANCELLED")) return true;
   if (order.status === "DRAFT" && items.length > 0) return true;
   if (order.status === "SERVED" || order.status === "HANDED_OVER") return true;
@@ -42,9 +48,20 @@ function isLiveFloorSession(order: any): boolean {
 
 function deriveKitchenStage(activeOrder: any): "QUEUED" | "COOKING" | "READY" | "SERVED" | null {
   const kots = activeOrder.kotTickets || [];
-  if (kots.some((k: any) => k.status === "READY")) return "READY";
-  if (kots.some((k: any) => COOKING_KOT_STATUSES.has(k.status))) return "COOKING";
-  if (kots.some((k: any) => QUEUED_KOT_STATUSES.has(k.status))) return "QUEUED";
+  const statuses = kots.map((k: any) => k.status);
+  const stage = kots.some((k: any) => QUEUED_KOT_STATUSES.has(k.status))
+    ? "QUEUED"
+    : kots.some((k: any) => COOKING_KOT_STATUSES.has(k.status))
+      ? "COOKING"
+      : kots.some((k: any) => k.status === "READY")
+        ? "READY"
+        : null;
+  // #region agent log
+  if (kots.length > 1 && new Set(statuses).size > 1) {
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'C',location:'tables.ts:deriveKitchenStage',message:'mixed KOT statuses',data:{orderId:activeOrder.id,statuses,stage},timestamp:Date.now(),runId:'wave3'})}).catch(()=>{});
+  }
+  // #endregion
+  if (stage) return stage;
   if (
     (kots.some((k: any) => k.status === "SERVED") && kots.every((k: any) => k.status === "SERVED" || k.status === "CANCELLED")) ||
     activeOrder.status === "SERVED" ||
@@ -124,7 +141,13 @@ tablesRouter.get("/tables", requireAuth, async (req: AuthedRequest, res) => {
       where: {
         outletId,
         diningTableId: { in: tableIds },
-        status: { in: [...OPEN_ORDER_STATUSES] },
+        OR: [
+          { status: { in: [...OPEN_ORDER_STATUSES] } },
+          {
+            status: "COMPLETED",
+            kotTickets: { some: { status: { notIn: ["SERVED", "CANCELLED"] } } },
+          },
+        ],
       },
       include: {
         kotTickets: {
@@ -264,6 +287,14 @@ tablesRouter.post("/tables/:id/vacant", requireAuth, async (req: AuthedRequest, 
       if (due > 0) {
         return res.status(409).json({
           error: "Table has an unpaid running order. Collect payment before vacating.",
+        });
+      }
+      const unserved = (liveOrder.kotTickets || []).some(
+        (k: any) => k.status !== "CANCELLED" && k.status !== "SERVED"
+      );
+      if (unserved) {
+        return res.status(409).json({
+          error: "Kitchen still has unserved tickets. Table stays occupied until food is served.",
         });
       }
     }
@@ -411,7 +442,13 @@ tablesRouter.get("/tables/occupancy", requireAuth, async (req: AuthedRequest, re
       include: {
         orders: {
           where: {
-            status: { in: [...OPEN_ORDER_STATUSES] },
+            OR: [
+              { status: { in: [...OPEN_ORDER_STATUSES] } },
+              {
+                status: "COMPLETED",
+                kotTickets: { some: { status: { notIn: ["SERVED", "CANCELLED"] } } },
+              },
+            ],
           },
           include: {
             kotTickets: true,
@@ -436,9 +473,19 @@ tablesRouter.get("/tables/occupancy", requireAuth, async (req: AuthedRequest, re
       occupiedCapacity: number;
     }>();
 
+    const liveGroupIds = new Set<string>();
     for (const t of tables) {
+      const groupId = (t as any).mergeGroupId as string | null;
+      if (groupId && t.orders.some((ord: any) => isLiveFloorSession(ord))) {
+        liveGroupIds.add(groupId);
+      }
+    }
+
+    for (const t of tables) {
+      const groupId = (t as any).mergeGroupId as string | null;
       const isOccupied =
-        Boolean((t as any).mergeGroupId) || t.orders.some((ord: any) => isLiveFloorSession(ord));
+        t.orders.some((ord: any) => isLiveFloorSession(ord))
+        || Boolean(groupId && liveGroupIds.has(groupId));
       const cap = t.capacity || 4;
       totalCapacity += cap;
 
@@ -479,6 +526,9 @@ tablesRouter.get("/tables/occupancy", requireAuth, async (req: AuthedRequest, re
       occupancyRatePercent: s.totalTables > 0 ? Number(((s.occupiedTables / s.totalTables) * 100).toFixed(1)) : 0,
     }));
 
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'W2',location:'tables.ts:GET /occupancy',message:'occupancy snapshot',data:{occupiedTables,totalTables,occupancyRatePercent:Number(occupancyRatePercent.toFixed(1)),liveGroupCount:liveGroupIds.size},timestamp:Date.now(),runId:'waiter-e2e'})}).catch(()=>{});
+    // #endregion
     res.status(200).json({
       outletId,
       totalTables,
@@ -596,7 +646,13 @@ tablesRouter.get("/tables/:id", requireAuth, async (req: AuthedRequest, res) => 
       include: {
         orders: {
           where: {
-            status: { in: [...OPEN_ORDER_STATUSES] },
+            OR: [
+              { status: { in: [...OPEN_ORDER_STATUSES] } },
+              {
+                status: "COMPLETED",
+                kotTickets: { some: { status: { notIn: ["SERVED", "CANCELLED"] } } },
+              },
+            ],
           },
           include: {
             orderItems: true,

@@ -35,13 +35,15 @@ router.get("/public/tables/:tableId/menu", async (req, res) => {
     }
 
     const catalogRepository = new PrismaMenuCatalogRepository(prisma);
-    const [categories, items] = await Promise.all([
+    const [categories, items, outlet] = await Promise.all([
       catalogRepository.listCategories(table.outletId),
       catalogRepository.listAllItems(table.outletId),
+      prisma.outlet.findUnique({ where: { id: table.outletId }, select: { name: true } }),
     ]);
 
     res.status(200).json({
       table: { id: table.id, tableNumber: table.tableNumber, section: table.section },
+      outletName: outlet?.name || null,
       categories,
       items: items
         // Don't let customers order items the kitchen has 86'd or run out of.

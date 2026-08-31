@@ -28,8 +28,8 @@ export default function TableManagement() {
   const [activeTab, setActiveTab] = useState<"VISUAL_FLOOR" | "TABLE_ADMIN" | "STATION_SLA">("VISUAL_FLOOR");
 
   const outlet = me?.outlet ?? null;
-  const outletName = outlet?.name || (authLoading ? "Loading..." : "Hotel Kapila");
-  const outletCode = outlet?.taxNumber ? `R${outlet.taxNumber.slice(0, 6)}` : "R327038";
+  const outletName = outlet?.name || (authLoading ? "Loading..." : "Outlet");
+  const outletCode = outlet?.code || "";
 
   const [tables, setTables] = useState<DiningTable[]>([]);
   const [loading, setLoading] = useState(true);

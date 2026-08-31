@@ -259,7 +259,12 @@ export function computeTableTurnaroundAverage(
   range: DateRange,
   rows: DineInTurnaroundRow[]
 ): TableTurnaroundAverage {
-  const qualifying = rows.filter((r) => r.orderType === "DINE_IN" && r.settledAt !== null);
+  const qualifying = rows.filter((r) => {
+    if (r.orderType !== "DINE_IN" || r.settledAt === null) return false;
+    const minutes = (r.settledAt.getTime() - r.createdAt.getTime()) / 60000;
+    // Late-settled abandoned covers (created days before settle) are leakage, not table turns.
+    return minutes >= 0 && minutes <= 12 * 60;
+  });
   const qualifyingOrderCount = qualifying.length;
 
   const totalMinutes = qualifying.reduce((sum, r) => {

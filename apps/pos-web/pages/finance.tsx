@@ -66,6 +66,8 @@ interface PettyCashExpenseApi {
 interface CashDrawerReconciliationApi {
   outletId: string;
   date: string;
+  sessionId: string | null;
+  sessionStatus: "OPEN" | "CLOSED" | "NONE" | string;
   openingFloatMinor: string;
   cashSalesMinor: string;
   cashRefundsMinor: string;
@@ -128,7 +130,7 @@ export default function FinancePage() {
   const [reconcileOpeningFloat, setReconcileOpeningFloat] = useState("2000");
   const [reconcileActualCount, setReconcileActualCount] = useState("");
   const [reconcileNotes, setReconcileNotes] = useState("");
-  const [savingReconcile, setSavingReconcile] = useState(false);
+  const [savingOpenShift, setSavingOpenShift] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [waiterHandovers, setWaiterHandovers] = useState<
     { id: string; waiterId: string; waiterName?: string; createdAt: string; actualCashCountedMinor: number; openingFloatMinor: number; netTipPayoutMinor: number; managerNotes: string }[]
@@ -250,6 +252,30 @@ export default function FinancePage() {
       showToast(`❌ Error: ${err.message}`);
     } finally {
       setSavingPetty(false);
+    }
+  };
+
+  const handleOpenShift = async () => {
+    const floatNum = parseFloat(reconcileOpeningFloat);
+    setSavingOpenShift(true);
+    try {
+      const res = await authedFetch("/finance/cash-drawer/open", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          openingFloatMinor: String(Math.round((isNaN(floatNum) ? 0 : floatNum) * 100)),
+        }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.error || "Failed to open cash drawer");
+      }
+      showToast("✅ Cash drawer shift opened");
+      fetchCashDrawer();
+    } catch (err: any) {
+      showToast(`❌ Error: ${err.message}`);
+    } finally {
+      setSavingOpenShift(false);
     }
   };
 
@@ -556,6 +582,28 @@ export default function FinancePage() {
                       <p className="panel-sub">Real-time cash float, order collections, expense disbursements & shift closing variance</p>
                     </div>
                     <div style={{ display: "flex", gap: "10px" }}>
+                      {cashDrawer?.sessionStatus === "NONE" && (
+                        <button
+                          type="button"
+                          onClick={handleOpenShift}
+                          disabled={savingOpenShift}
+                          style={{
+                            padding: "8px 14px",
+                            borderRadius: "var(--radius-md, 8px)",
+                            border: "1px solid #86efac",
+                            background: "#f0fdf4",
+                            color: "#166534",
+                            fontSize: "0.8125rem",
+                            fontWeight: 700,
+                            cursor: savingOpenShift ? "wait" : "pointer",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: "6px",
+                          }}
+                        >
+                          {savingOpenShift ? "Opening…" : "🔓 Open Shift"}
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => setIsPettyCashOpen(true)}
@@ -578,6 +626,7 @@ export default function FinancePage() {
                       <button
                         type="button"
                         onClick={() => setIsReconcileOpen(true)}
+                        disabled={cashDrawer?.sessionStatus !== "OPEN"}
                         style={{
                           padding: "8px 14px",
                           borderRadius: "var(--radius-md, 8px)",
@@ -665,8 +714,12 @@ export default function FinancePage() {
                             </div>
                           ) : (
                             <div style={{ marginTop: "6px" }}>
-                              <span style={{ display: "inline-block", padding: "4px 8px", borderRadius: "4px", background: "#fef3c7", color: "#92400e", fontSize: "0.75rem", fontWeight: 800 }}>
-                                ⏳ Shift Open (Unreconciled)
+                              <span style={{ display: "inline-block", padding: "4px 8px", borderRadius: "4px", background: cashDrawer.sessionStatus === "OPEN" ? "#fef3c7" : "#e2e8f0", color: cashDrawer.sessionStatus === "OPEN" ? "#92400e" : "#334155", fontSize: "0.75rem", fontWeight: 800 }}>
+                                {cashDrawer.sessionStatus === "OPEN"
+                                  ? "⏳ Shift Open (Unreconciled)"
+                                  : cashDrawer.sessionStatus === "CLOSED"
+                                    ? "Shift closed"
+                                    : "No open shift"}
                               </span>
                             </div>
                           )}

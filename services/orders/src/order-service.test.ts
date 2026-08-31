@@ -475,6 +475,7 @@ describe("getOrderDetail", () => {
       externalOrderId: null,
       priceMismatch: false,
       customerId: null,
+      customerPhone: null,
       customerName: null,
       waiterName: null,
       paymentMethod: null,

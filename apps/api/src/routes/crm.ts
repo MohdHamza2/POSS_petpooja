@@ -4,7 +4,7 @@ import { prisma } from "../prisma";
 
 export const crmRouter = Router();
 
-function mapCustomerResponse(c: any) {
+function mapCustomerResponse(c: any, accountBalance?: number) {
   return {
     id: c.id,
     outletId: c.outletId,
@@ -13,12 +13,26 @@ function mapCustomerResponse(c: any) {
     lastName: c.lastName || (c.name ? c.name.split(" ").slice(1).join(" ") : null),
     phone: c.phone,
     email: c.email || null,
-    loyaltyPoints: c.loyaltyPoints !== undefined ? Number(c.loyaltyPoints) : Number(c.loyalty_points || 0),
+    loyaltyPoints: accountBalance !== undefined
+      ? accountBalance
+      : (c.loyaltyPoints !== undefined ? Number(c.loyaltyPoints) : Number(c.loyalty_points || 0)),
     birthDate: c.birthDate ? new Date(c.birthDate).toISOString().split("T")[0] : (c.birth_date ? new Date(c.birth_date).toISOString().split("T")[0] : null),
     isActive: c.isActive ?? c.is_active ?? true,
     createdAt: c.createdAt ? new Date(c.createdAt).toISOString() : new Date().toISOString(),
     updatedAt: c.updatedAt ? new Date(c.updatedAt).toISOString() : new Date().toISOString(),
   };
+}
+
+async function loyaltyBalanceByCustomerIds(ids: string[]): Promise<Map<string, number>> {
+  const map = new Map<string, number>();
+  if (ids.length === 0) return map;
+  const accts = await (prisma as any).loyalty_accounts.findMany({
+    where: { customer_id: { in: ids } },
+  });
+  for (const a of accts) {
+    map.set(a.customer_id, Number(a.balance));
+  }
+  return map;
 }
 
 // Create Customer
@@ -113,8 +127,9 @@ crmRouter.get("/customers", requireAuth, requirePermission("crm.read"), async (r
       prisma.customer.count({ where }),
     ]);
 
+    const balances = await loyaltyBalanceByCustomerIds(customers.map((c) => c.id));
     res.status(200).json({
-      customers: customers.map(mapCustomerResponse),
+      customers: customers.map((c) => mapCustomerResponse(c, balances.get(c.id))),
       total,
       limit: take,
       offset: skip,
@@ -140,7 +155,8 @@ crmRouter.get("/customers/:id", requireAuth, requirePermission("crm.read"), asyn
       return res.status(404).json({ error: "Customer not found" });
     }
 
-    res.status(200).json(mapCustomerResponse(customer));
+    const balances = await loyaltyBalanceByCustomerIds([customer.id]);
+    res.status(200).json(mapCustomerResponse(customer, balances.get(customer.id)));
   } catch (error: any) {
     console.error("Error fetching customer:", error);
     res.status(500).json({ error: error.message });

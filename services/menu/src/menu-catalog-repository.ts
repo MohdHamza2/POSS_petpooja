@@ -52,14 +52,19 @@ export class PrismaMenuCatalogRepository {
   }
 
   async createModifierOption(outletId: string, modifierGroupId: string, name: string, priceMinor: bigint) {
-    return this.prisma.modifier_options.create({
-      data: { outletId, modifierGroupId, name, price: priceMinor },
+    return this.prisma.modifiers.create({
+      data: {
+        outlet_id: outletId,
+        group_id: modifierGroupId,
+        name,
+        price_delta_minor: priceMinor,
+      },
     });
   }
 
-  async linkModifierToItem(menuItemId: string, modifierGroupId: string) {
+  async linkModifierToItem(outletId: string, menuItemId: string, modifierGroupId: string) {
     return this.prisma.item_modifier_groups.create({
-      data: { menuItemId, modifierGroupId },
+      data: { outlet_id: outletId, item_id: menuItemId, group_id: modifierGroupId },
     });
   }
 

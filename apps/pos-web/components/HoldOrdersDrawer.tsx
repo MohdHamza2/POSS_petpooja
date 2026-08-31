@@ -1,13 +1,15 @@
 import React, { useState, useEffect } from "react";
+import { authedFetch } from "../lib/auth";
 
-interface HeldOrder {
+export interface HeldOrder {
   id: string;
   tableNumber: string;
+  diningTableId?: string | null;
   orderType: string;
   itemCount: number;
   totalMinor: number;
   heldAt: string;
-  cart: any[];
+  items?: Array<{ id: string; menuItemId: string; name: string; quantity: number; unitPriceMinor: number; notes?: string | null }>;
 }
 
 interface HoldOrdersDrawerProps {
@@ -17,30 +19,44 @@ interface HoldOrdersDrawerProps {
 
 export default function HoldOrdersDrawer({ onClose, onResumeOrder }: HoldOrdersDrawerProps) {
   const [heldOrders, setHeldOrders] = useState<HeldOrder[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
+  const loadHeld = async () => {
     try {
-      const stored = localStorage.getItem("petpooja_held_orders");
-      if (stored) {
-        setHeldOrders(JSON.parse(stored));
+      const res = await authedFetch("/orders/held");
+      if (!res.ok) {
+        setHeldOrders([]);
+        return;
       }
+      const data = await res.json();
+      setHeldOrders(Array.isArray(data) ? data : []);
     } catch (e) {
       console.error(e);
+      setHeldOrders([]);
+    } finally {
+      setLoading(false);
     }
+  };
+
+  useEffect(() => {
+    loadHeld();
   }, []);
 
   const handleResume = (order: HeldOrder) => {
-    const next = heldOrders.filter((o) => o.id !== order.id);
-    setHeldOrders(next);
-    localStorage.setItem("petpooja_held_orders", JSON.stringify(next));
     if (onResumeOrder) onResumeOrder(order);
     onClose();
   };
 
-  const handleDiscard = (id: string) => {
-    const next = heldOrders.filter((o) => o.id !== id);
-    setHeldOrders(next);
-    localStorage.setItem("petpooja_held_orders", JSON.stringify(next));
+  const handleDiscard = async (id: string) => {
+    try {
+      await authedFetch(`/orders/${id}/cancel`, {
+        method: "POST",
+        body: JSON.stringify({ reasonCode: "HELD_DISCARDED" }),
+      });
+    } catch (e) {
+      console.error(e);
+    }
+    setHeldOrders((prev) => prev.filter((o) => o.id !== id));
   };
 
   return (
@@ -55,7 +71,9 @@ export default function HoldOrdersDrawer({ onClose, onResumeOrder }: HoldOrdersD
         </div>
 
         <div className="held-orders-list">
-          {heldOrders.length === 0 ? (
+          {loading ? (
+            <div className="empty-hold">Loading parked orders…</div>
+          ) : heldOrders.length === 0 ? (
             <div className="empty-hold">No active held carts. Use the Hold button during billing to park an order.</div>
           ) : (
             heldOrders.map((ord) => (

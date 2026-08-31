@@ -16,8 +16,14 @@ export function formatMergedTableLabel(numbers: string[]): string {
 }
 
 function isLiveFloorSession(order: any): boolean {
+  if (order.advanceStatus === "HELD") return false;
   const kots = order.kotTickets || [];
   const items = order.orderItems || [];
+  const unserved = kots.some(
+    (k: any) => k.status !== "CANCELLED" && k.status !== "SERVED"
+  );
+  if (order.status === "COMPLETED") return unserved;
+  if (unserved) return true;
   if (kots.some((k: any) => k.status !== "CANCELLED")) return true;
   if (order.status === "DRAFT" && items.length > 0) return true;
   if (order.status === "SERVED" || order.status === "HANDED_OVER") return true;
@@ -139,7 +145,13 @@ export async function findLiveOrdersOnTables(
     where: {
       outletId,
       diningTableId: { in: tableIds },
-      status: { in: [...OPEN_ORDER_STATUSES] },
+      OR: [
+        { status: { in: [...OPEN_ORDER_STATUSES] } },
+        {
+          status: "COMPLETED",
+          kotTickets: { some: { status: { notIn: ["SERVED", "CANCELLED"] } } },
+        },
+      ],
     },
     include: {
       orderItems: { where: { isVoided: false } },

@@ -73,6 +73,7 @@ export interface PricedOrderLine {
   modifiers: PricedOrderLineModifier[];
   course?: string;
   seatNumber?: number;
+  notes?: string;
 }
 
 export interface PricedOrder {

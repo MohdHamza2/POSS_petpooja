@@ -17,8 +17,8 @@ interface PetPoojaHeaderProps {
 }
 
 export default function PetPoojaHeader({
-  outletName = "Hotel Kapila",
-  outletCode = "R327038",
+  outletName = "Outlet",
+  outletCode = "",
   onNewOrder,
   activeMode,
   onModeChange,
@@ -46,49 +46,25 @@ export default function PetPoojaHeader({
     type: "WARNING" | "INFO" | "ORDER" | "FINANCE";
     time: string;
     isRead: boolean;
-  }>>([
-    {
-      id: "notif-1",
-      title: "Low Stock: Raw Ingredients",
-      message: "Saffron Pure Grade A is below threshold (20 g remaining)",
-      type: "WARNING",
-      time: "5m ago",
-      isRead: false,
-    },
-    {
-      id: "notif-2",
-      title: "Table 4 Bill Request",
-      message: "Guest requested bill for Table 4 (Bill Total: ₹1,250.00)",
-      type: "INFO",
-      time: "12m ago",
-      isRead: false,
-    },
-    {
-      id: "notif-3",
-      title: "Online Order #SW-1082 Synced",
-      message: "New Swiggy order placed and dispatched to KDS",
-      type: "ORDER",
-      time: "25m ago",
-      isRead: false,
-    },
-  ]);
+  }>>([]);
 
   useEffect(() => {
     authedFetch("/notifications")
       .then((res) => (res.ok ? res.json() : []))
       .then((data: any[]) => {
-        if (Array.isArray(data) && data.length > 0) {
-          setNotifications(
-            data.map((n) => ({
-              id: n.id,
-              title: n.title || "Alert",
-              message: n.message || "",
-              type: (n.type as any) || "INFO",
-              time: new Date(n.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-              isRead: Boolean(n.isRead),
-            }))
-          );
-        }
+        // Notifications are DB-driven only. The list always reflects what the
+        // API returns (an empty array clears the badge) — never a hardcoded
+        // demo seed, per the no-hardcode-data rule.
+        setNotifications(
+          (Array.isArray(data) ? data : []).map((n) => ({
+            id: n.id,
+            title: n.title || "Alert",
+            message: n.message || "",
+            type: (n.type as any) || "INFO",
+            time: new Date(n.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+            isRead: Boolean(n.isRead),
+          }))
+        );
       })
       .catch(() => {});
 
@@ -267,10 +243,14 @@ export default function PetPoojaHeader({
             <span className="icon-caption">Logout</span>
           </button>
 
-          <div className="header-support-pill" onClick={() => setShowSupportModal(true)}>
+          <button
+            type="button"
+            className="header-support-pill"
+            onClick={() => setShowSupportModal(true)}
+          >
             <span className="support-title">Need Help?</span>
-            <span className="support-phone">07969 223344</span>
-          </div>
+            <span className="support-phone">{outletName}</span>
+          </button>
         </div>
       </header>
 
@@ -342,7 +322,17 @@ export default function PetPoojaHeader({
 
       {/* Hold Orders Drawer */}
       {isHoldOpen && (
-        <HoldOrdersDrawer onClose={() => setIsHoldOpen(false)} />
+        <HoldOrdersDrawer
+          onClose={() => setIsHoldOpen(false)}
+          onResumeOrder={(order) => {
+            setIsHoldOpen(false);
+            const q = new URLSearchParams();
+            if (order.tableNumber) q.set("table", order.tableNumber);
+            if (order.diningTableId) q.set("tableId", order.diningTableId);
+            q.set("resumeHold", order.id);
+            router.push(`/?${q.toString()}`);
+          }}
+        />
       )}
 
       {/* INTERACTIVE STORE OPERATIONS CONTROL MODAL */}
@@ -533,13 +523,10 @@ export default function PetPoojaHeader({
       {showSupportModal && (
         <div className="petpooja-modal-backdrop" onClick={() => setShowSupportModal(false)}>
           <div className="petpooja-modal-card" onClick={(e) => e.stopPropagation()}>
-            <h3>PetPooja 24x7 Merchant Support</h3>
+            <h3>POS support</h3>
             <p style={{ margin: "12px 0", color: "var(--text-secondary)" }}>
-              Direct line for billing, thermal printing, and aggregator escalation assistance:
+              For billing, printers, and aggregator issues, contact your outlet manager at {outletName}.
             </p>
-            <div style={{ fontSize: "1.25rem", fontWeight: 700, color: "#e11d48", padding: "12px", background: "#fff1f2", borderRadius: "8px", textAlign: "center" }}>
-              📞 07969 223344
-            </div>
             <div style={{ marginTop: "16px", display: "flex", justifyContent: "flex-end" }}>
               <button className="petpooja-btn-secondary" onClick={() => setShowSupportModal(false)}>Close</button>
             </div>

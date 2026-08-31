@@ -90,7 +90,9 @@ export class ZReportGenerator {
       totalTips,
       totalServiceCharge,
       paymentModes,
-      invoiceCount: orders.length,
+      invoiceCount: orders.length === 0
+        ? 0
+        : await this.prisma.invoice.count({ where: { orderId: { in: orders.map((o) => o.id) } } }),
       handoverCount: handovers.length,
       handoverCashCounted,
       handoverTipPayout,

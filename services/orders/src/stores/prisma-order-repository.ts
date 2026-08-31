@@ -34,19 +34,16 @@ export class PrismaModifierPriceLookup implements ModifierPriceLookup {
   async getPrices(modifierOptionIds: string[], outletId: string): Promise<Map<string, bigint>> {
     const map = new Map<string, bigint>();
     const validIds = (modifierOptionIds || []).filter(Boolean);
-    if (validIds.length === 0 || !(this.prisma as any).modifierOption) {
+    if (validIds.length === 0) {
       return map;
     }
 
     try {
-      const rows = await (this.prisma as any).modifierOption.findMany({
-        where: { id: { in: validIds }, outletId },
+      const rows = await this.prisma.modifiers.findMany({
+        where: { id: { in: validIds }, outlet_id: outletId, is_active: true },
       });
-
       for (const row of rows) {
-        const num = Number(row.price || 0);
-        const priceMinor = BigInt(Math.round(num * 100));
-        map.set(row.id, priceMinor);
+        map.set(row.id, BigInt(row.price_delta_minor ?? 0));
       }
     } catch {}
 
@@ -130,6 +127,7 @@ export class PrismaOrderRepository implements OrderRepository {
             subtotal: line.subtotalMinor,
             course: line.course || null,
             seatNumber: line.seatNumber || null,
+            notes: line.notes || null,
           },
         });
       }
@@ -345,6 +343,20 @@ export class PrismaOrderRepository implements OrderRepository {
       return null;
     }
 
+    let customerName: string | null = null;
+    let customerPhone: string | null = null;
+    if (row.customerId) {
+      const customer = await this.prisma.customer.findUnique({
+        where: { id: row.customerId },
+        select: { name: true, firstName: true, lastName: true, phone: true },
+      });
+      if (customer) {
+        const parts = [customer.firstName, customer.lastName].filter(Boolean).join(" ").trim();
+        customerName = parts || customer.name || null;
+        customerPhone = customer.phone || null;
+      }
+    }
+
     return {
       id: row.id,
       orderNumber: row.orderNumber,
@@ -360,7 +372,8 @@ export class PrismaOrderRepository implements OrderRepository {
       terminalNumber: "POS-01",
       diningTableId: row.diningTableId,
       customerId: row.customerId,
-      customerName: null,
+      customerPhone,
+      customerName,
       waiterName: null,
       paymentMethod: payments.length > 0 ? payments[0].method : null,
       createdAt: row.createdAt,
@@ -618,21 +631,9 @@ export class PrismaOrderRepository implements OrderRepository {
         });
         const totalPaid = allPayments.reduce((sum, p) => sum + p.amount, 0n);
         if (totalPaid >= order.grandTotal) {
-          const transitions: string[] = [];
-          if (order.status === "DRAFT") transitions.push("PLACED", "CONFIRMED", "KOT_CREATED", "IN_PREPARATION", "READY", "SERVED", "COMPLETED");
-          else if (order.status === "PLACED") transitions.push("CONFIRMED", "KOT_CREATED", "IN_PREPARATION", "READY", "SERVED", "COMPLETED");
-          else if (order.status === "CONFIRMED") transitions.push("KOT_CREATED", "IN_PREPARATION", "READY", "SERVED", "COMPLETED");
-          else if (order.status === "KOT_CREATED") transitions.push("IN_PREPARATION", "READY", "SERVED", "COMPLETED");
-          else if (order.status === "IN_PREPARATION") transitions.push("READY", "SERVED", "COMPLETED");
-          else if (order.status === "READY") transitions.push("SERVED", "COMPLETED");
-          else if (order.status === "SERVED" || order.status === "HANDED_OVER" || order.status === "OUT_FOR_DELIVERY") transitions.push("COMPLETED");
-
-          for (const nextStatus of transitions) {
-            await tx.order.update({
-              where: { id: orderId },
-              data: { status: nextStatus as any },
-            });
-          }
+          // #region agent log
+          fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'A',location:'prisma-order-repository.ts:recordPayment',message:'recordPayment fully paid, status left unchanged',data:{orderId,fromStatus:order.status,totalPaid:totalPaid.toString(),grandTotal:order.grandTotal.toString(),walkedToCompleted:false},timestamp:Date.now(),runId:'post-fix'})}).catch(()=>{});
+          // #endregion
         }
       }
 

@@ -1,13 +1,29 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
+import { authedFetch } from "../../lib/auth";
 import { MenuItemData } from "./AttractiveMenuItemCard";
 
 export interface CustomizedItemSelection {
   portion: "REGULAR" | "HALF" | "FULL";
   portionMultiplier: number;
   spiceLevel: "MILD" | "MEDIUM" | "SPICY" | "EXTRA_HOT";
-  addons: Array<{ name: string; priceMinor: number }>;
+  addons: Array<{ id: string; name: string; priceMinor: number }>;
   specialInstructions: string;
   finalPriceMinor: number;
+  modifierOptionIds: string[];
+}
+
+interface ModifierOption {
+  id: string;
+  name: string;
+  priceMinor: number;
+}
+
+interface ModifierGroup {
+  id: string;
+  name: string;
+  minSelect: number;
+  maxSelect: number;
+  options: ModifierOption[];
 }
 
 interface MenuCustomizerModalProps {
@@ -17,53 +33,93 @@ interface MenuCustomizerModalProps {
   onConfirm: (item: MenuItemData, customization: CustomizedItemSelection) => void;
 }
 
+function isPortionGroup(name: string): boolean {
+  const n = (name || "").toLowerCase();
+  return n.includes("portion") || n.includes("size") || n.includes("half") || n.includes("full");
+}
+
 export default function MenuCustomizerModal({
   isOpen,
   item,
   onClose,
   onConfirm,
 }: MenuCustomizerModalProps) {
-  const [portion, setPortion] = useState<"REGULAR" | "HALF" | "FULL">("REGULAR");
   const [spiceLevel, setSpiceLevel] = useState<"MILD" | "MEDIUM" | "SPICY" | "EXTRA_HOT">("MEDIUM");
-  const [selectedAddons, setSelectedAddons] = useState<Array<{ name: string; priceMinor: number }>>([]);
   const [notes, setNotes] = useState("");
+  const [groups, setGroups] = useState<ModifierGroup[]>([]);
+  const [loadingGroups, setLoadingGroups] = useState(false);
+  const [portionOptionId, setPortionOptionId] = useState<string | null>(null);
+  const [selectedAddonIds, setSelectedAddonIds] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (!isOpen || !item) return;
+    setSpiceLevel("MEDIUM");
+    setNotes("");
+    setPortionOptionId(null);
+    setSelectedAddonIds([]);
+    setGroups([]);
+    let cancelled = false;
+    setLoadingGroups(true);
+    authedFetch(`/menu/items/${item.id}/modifiers`)
+      .then(async (res) => {
+        const data = res.ok ? await res.json() : [];
+        if (cancelled) return;
+        setGroups(Array.isArray(data) ? data : []);
+        // #region agent log
+        fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'D',location:'MenuCustomizerModal.tsx:load',message:'customizer loaded catalog modifiers',data:{menuItemId:item.id,groupCount:Array.isArray(data)?data.length:0,hardcodedAddons:false},timestamp:Date.now(),runId:'wave3'})}).catch(()=>{});
+        // #endregion
+      })
+      .catch(() => {
+        if (!cancelled) setGroups([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingGroups(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, item?.id]);
 
   if (!isOpen || !item) return null;
 
   const basePrice = Number(item.priceMinor);
+  const portionGroups = groups.filter((g) => isPortionGroup(g.name));
+  const addonGroups = groups.filter((g) => !isPortionGroup(g.name));
+  const portionOptions = portionGroups.flatMap((g) => g.options);
+  const addonOptions = addonGroups.flatMap((g) => g.options);
 
-  // Portion multiplier calculation
-  const portionMultiplier = portion === "HALF" ? 0.65 : portion === "FULL" ? 1.4 : 1.0;
-  const portionAdjustedBase = Math.round(basePrice * portionMultiplier);
+  const portionDelta = portionOptions.find((o) => o.id === portionOptionId)?.priceMinor || 0;
+  const selectedAddons = addonOptions.filter((o) => selectedAddonIds.includes(o.id));
+  const addonsTotalMinor = selectedAddons.reduce((sum, a) => sum + a.priceMinor, 0);
+  const finalPriceMinor = basePrice + portionDelta + addonsTotalMinor;
 
-  // Available addons
-  const availableAddons = [
-    { name: "Extra Pure Ghee", priceMinor: 2500 },
-    { name: "Extra Amul Butter", priceMinor: 2000 },
-    { name: "Extra Sambar Cup", priceMinor: 1500 },
-    { name: "Grated Cheese Topping", priceMinor: 3000 },
-    { name: "Jain Style (No Onion/Garlic)", priceMinor: 0 },
-  ];
-
-  const toggleAddon = (addon: { name: string; priceMinor: number }) => {
-    setSelectedAddons((prev) => {
-      const exists = prev.some((a) => a.name === addon.name);
-      if (exists) return prev.filter((a) => a.name !== addon.name);
-      return [...prev, addon];
+  const toggleAddon = (option: ModifierOption, group: ModifierGroup) => {
+    setSelectedAddonIds((prev) => {
+      const exists = prev.includes(option.id);
+      if (exists) return prev.filter((id) => id !== option.id);
+      const groupOptionIds = new Set(group.options.map((o) => o.id));
+      const selectedInGroup = prev.filter((id) => groupOptionIds.has(id));
+      if (group.maxSelect > 0 && selectedInGroup.length >= group.maxSelect) {
+        const withoutOldest = prev.filter((id) => id !== selectedInGroup[0]);
+        return [...withoutOldest, option.id];
+      }
+      return [...prev, option.id];
     });
   };
 
-  const addonsTotalMinor = selectedAddons.reduce((sum, a) => sum + a.priceMinor, 0);
-  const finalPriceMinor = portionAdjustedBase + addonsTotalMinor;
-
   const handleApply = () => {
+    const portionName = portionOptions.find((o) => o.id === portionOptionId)?.name || "Regular";
+    const portionKey = /half/i.test(portionName) ? "HALF" : /full|large/i.test(portionName) ? "FULL" : "REGULAR";
+    const spiceNote = `Spice: ${spiceLevel}`;
+    const mergedNotes = notes.trim() ? `${spiceNote}. ${notes.trim()}` : spiceNote;
     onConfirm(item, {
-      portion,
-      portionMultiplier,
+      portion: portionKey,
+      portionMultiplier: 1,
       spiceLevel,
-      addons: selectedAddons,
-      specialInstructions: notes,
+      addons: selectedAddons.map((a) => ({ id: a.id, name: a.name, priceMinor: a.priceMinor })),
+      specialInstructions: mergedNotes,
       finalPriceMinor,
+      modifierOptionIds: [portionOptionId, ...selectedAddonIds].filter((id): id is string => Boolean(id)),
     });
     onClose();
   };
@@ -71,7 +127,6 @@ export default function MenuCustomizerModal({
   return (
     <div className="customizer-backdrop" onClick={onClose}>
       <div className="customizer-card" onClick={(e) => e.stopPropagation()}>
-        {/* Header */}
         <div className="customizer-header">
           <div className="title-group">
             <div className="item-badge-title">
@@ -84,38 +139,36 @@ export default function MenuCustomizerModal({
         </div>
 
         <div className="customizer-body-scroll">
-          {/* 1. Portion Size */}
           <div className="customizer-section">
             <label className="section-label">1. Choose Portion Size</label>
             <div className="portion-grid">
               <button
                 type="button"
-                className={`portion-chip ${portion === "HALF" ? "active" : ""}`}
-                onClick={() => setPortion("HALF")}
-              >
-                <span>Half Portion</span>
-                <span className="portion-price">₹{((basePrice * 0.65) / 100).toFixed(0)}</span>
-              </button>
-              <button
-                type="button"
-                className={`portion-chip ${portion === "REGULAR" ? "active" : ""}`}
-                onClick={() => setPortion("REGULAR")}
+                className={`portion-chip ${portionOptionId === null ? "active" : ""}`}
+                onClick={() => setPortionOptionId(null)}
               >
                 <span>Regular (Standard)</span>
                 <span className="portion-price">₹{(basePrice / 100).toFixed(0)}</span>
               </button>
-              <button
-                type="button"
-                className={`portion-chip ${portion === "FULL" ? "active" : ""}`}
-                onClick={() => setPortion("FULL")}
-              >
-                <span>Full / Large</span>
-                <span className="portion-price">₹{((basePrice * 1.4) / 100).toFixed(0)}</span>
-              </button>
+              {portionOptions.map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  className={`portion-chip ${portionOptionId === opt.id ? "active" : ""}`}
+                  onClick={() => setPortionOptionId(opt.id)}
+                >
+                  <span>{opt.name}</span>
+                  <span className="portion-price">
+                    ₹{((basePrice + opt.priceMinor) / 100).toFixed(0)}
+                  </span>
+                </button>
+              ))}
             </div>
+            {portionOptions.length === 0 && !loadingGroups && (
+              <div className="empty-mods">No portion variants in catalog. Regular price applies.</div>
+            )}
           </div>
 
-          {/* 2. Spice Level */}
           <div className="customizer-section">
             <label className="section-label">2. Spice Level</label>
             <div className="spice-grid">
@@ -137,37 +190,44 @@ export default function MenuCustomizerModal({
             </div>
           </div>
 
-          {/* 3. Add-on Extras */}
           <div className="customizer-section">
             <label className="section-label">3. Add-on Extras</label>
-            <div className="addons-list">
-              {availableAddons.map((addon) => {
-                const isChecked = selectedAddons.some((a) => a.name === addon.name);
-                return (
-                  <div
-                    key={addon.name}
-                    className={`addon-row ${isChecked ? "active" : ""}`}
-                    onClick={() => toggleAddon(addon)}
-                  >
-                    <div className="addon-info">
-                      <input
-                        type="checkbox"
-                        checked={isChecked}
-                        onChange={() => {}}
-                        className="addon-checkbox"
-                      />
-                      <span className="addon-name">{addon.name}</span>
-                    </div>
-                    <span className="addon-price">
-                      {addon.priceMinor === 0 ? "Free" : `+₹${(addon.priceMinor / 100).toFixed(2)}`}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
+            {loadingGroups ? (
+              <div className="empty-mods">Loading catalog extras…</div>
+            ) : addonGroups.length === 0 ? (
+              <div className="empty-mods">No add-ons linked to this item.</div>
+            ) : (
+              addonGroups.map((group) => (
+                <div key={group.id} className="addons-list">
+                  <div className="addon-group-name">{group.name}</div>
+                  {group.options.map((addon) => {
+                    const isChecked = selectedAddonIds.includes(addon.id);
+                    return (
+                      <div
+                        key={addon.id}
+                        className={`addon-row ${isChecked ? "active" : ""}`}
+                        onClick={() => toggleAddon(addon, group)}
+                      >
+                        <div className="addon-info">
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => {}}
+                            className="addon-checkbox"
+                          />
+                          <span className="addon-name">{addon.name}</span>
+                        </div>
+                        <span className="addon-price">
+                          {addon.priceMinor === 0 ? "Free" : `+₹${(addon.priceMinor / 100).toFixed(2)}`}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))
+            )}
           </div>
 
-          {/* 4. Special Kitchen Note */}
           <div className="customizer-section">
             <label className="section-label">4. Special Instructions (KOT Note)</label>
             <input
@@ -180,7 +240,6 @@ export default function MenuCustomizerModal({
           </div>
         </div>
 
-        {/* Footer with Total and Add to Cart Button */}
         <div className="customizer-footer">
           <div className="footer-total-box">
             <span className="footer-total-label">Customized Total:</span>
@@ -207,7 +266,6 @@ export default function MenuCustomizerModal({
           justify-content: center;
           font-family: inherit;
         }
-
         .customizer-card {
           background: #ffffff;
           border-radius: 16px;
@@ -219,7 +277,6 @@ export default function MenuCustomizerModal({
           display: flex;
           flex-direction: column;
         }
-
         .customizer-header {
           display: flex;
           align-items: center;
@@ -227,32 +284,25 @@ export default function MenuCustomizerModal({
           border-bottom: 1px solid #e2e8f0;
           padding-bottom: 12px;
         }
-
         .item-badge-title {
           display: flex;
           align-items: center;
           gap: 8px;
         }
-
-        .fssai-indicator {
-          font-size: 1.1rem;
-        }
+        .fssai-indicator { font-size: 1.1rem; }
         .fssai-indicator.veg { color: #16a34a; }
         .fssai-indicator.non-veg { color: #dc2626; }
-
         .item-name-heading {
           margin: 0;
           font-size: 1.125rem;
           font-weight: 800;
           color: #0f172a;
         }
-
         .base-price-tag {
           font-size: 0.75rem;
           color: #64748b;
           font-weight: 600;
         }
-
         .btn-close {
           background: transparent;
           border: none;
@@ -260,7 +310,6 @@ export default function MenuCustomizerModal({
           color: #64748b;
           cursor: pointer;
         }
-
         .customizer-body-scroll {
           flex: 1;
           overflow-y: auto;
@@ -269,13 +318,11 @@ export default function MenuCustomizerModal({
           flex-direction: column;
           gap: 16px;
         }
-
         .customizer-section {
           display: flex;
           flex-direction: column;
           gap: 8px;
         }
-
         .section-label {
           font-size: 0.8125rem;
           font-weight: 800;
@@ -283,7 +330,16 @@ export default function MenuCustomizerModal({
           text-transform: uppercase;
           letter-spacing: 0.3px;
         }
-
+        .empty-mods {
+          font-size: 0.8rem;
+          color: #94a3b8;
+        }
+        .addon-group-name {
+          font-size: 0.75rem;
+          font-weight: 700;
+          color: #64748b;
+          margin-top: 4px;
+        }
         .portion-grid {
           display: grid;
           grid-template-columns: repeat(3, 1fr);
@@ -314,7 +370,6 @@ export default function MenuCustomizerModal({
           font-weight: 900;
           color: #0f172a;
         }
-
         .spice-grid {
           display: grid;
           grid-template-columns: repeat(4, 1fr);
@@ -337,7 +392,6 @@ export default function MenuCustomizerModal({
           color: #c2410c;
           box-shadow: 0 0 0 1px #f97316;
         }
-
         .addons-list {
           display: flex;
           flex-direction: column;
@@ -372,7 +426,6 @@ export default function MenuCustomizerModal({
           font-weight: 700;
           color: #0f172a;
         }
-
         .notes-input {
           padding: 10px 12px;
           border: 1px solid #cbd5e1;
@@ -380,7 +433,6 @@ export default function MenuCustomizerModal({
           font-size: 0.8125rem;
           font-family: inherit;
         }
-
         .customizer-footer {
           display: flex;
           align-items: center;
@@ -402,7 +454,6 @@ export default function MenuCustomizerModal({
           font-weight: 900;
           color: #0f172a;
         }
-
         .btn-confirm-add {
           background: #2563eb;
           color: #ffffff;

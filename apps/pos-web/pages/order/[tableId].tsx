@@ -21,6 +21,7 @@ interface MenuItemApi {
 
 interface MenuResponse {
   table: { id: string; tableNumber: string; section: string | null };
+  outletName?: string | null;
   categories: { id: string; name: string }[];
   items: MenuItemApi[];
 }
@@ -196,7 +197,7 @@ export default function TableSelfOrderPage() {
       <header className="bg-white border-b border-slate-200 px-4 py-3 sticky top-0 z-20 shadow-sm">
         <div className="max-w-3xl mx-auto flex items-center justify-between">
           <div>
-            <h1 className="font-extrabold text-slate-900 text-base">Hotel Kapila</h1>
+            <h1 className="font-extrabold text-slate-900 text-base">{menu.outletName || "Menu"}</h1>
             <p className="text-xs text-slate-500">
               Table {menu.table.tableNumber}
               {menu.table.section ? ` · ${menu.table.section}` : ""}

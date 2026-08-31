@@ -59,8 +59,24 @@ export class PrismaReportingRepository implements ReportingRepository {
   }
 
   async listPaymentsInRange(outletId: string, range: DateRange): Promise<PaymentAggregateRow[]> {
+    // Payment has no Prisma relation to Order (only orderId). Match sales/tax
+    // settle-time window via order ids — payment.createdAt pulled prior-day
+    // session cash into the Day KPI.
+    const settled = await this.prisma.order.findMany({
+      where: {
+        outletId,
+        status: "COMPLETED",
+        OR: [
+          { settledAt: { gte: range.fromDate, lte: range.toDate } },
+          { AND: [{ settledAt: null }, { createdAt: { gte: range.fromDate, lte: range.toDate } }] },
+        ],
+      },
+      select: { id: true },
+    });
+    const orderIds = settled.map((o) => o.id);
+    if (orderIds.length === 0) return [];
     const rows = await this.prisma.payment.findMany({
-      where: { outletId, createdAt: { gte: range.fromDate, lte: range.toDate } },
+      where: { outletId, orderId: { in: orderIds } },
       select: { method: true, status: true, amount: true },
     });
 
@@ -75,7 +91,7 @@ export class PrismaReportingRepository implements ReportingRepository {
     const rows = await this.prisma.order.findMany({
       where: {
         outletId,
-        status: "COMPLETED",
+        status: { in: ["COMPLETED", "CANCELLED"] },
         OR: [
           { settledAt: { gte: range.fromDate, lte: range.toDate } },
           { AND: [{ settledAt: null }, { createdAt: { gte: range.fromDate, lte: range.toDate } }] },
@@ -160,8 +176,12 @@ export class PrismaReportingRepository implements ReportingRepository {
   // revenue-at-risk is estimated from the parent Order's grandTotal
   async listKotsNotBilledInRange(outletId: string, range: DateRange): Promise<UnbilledKotRow[]> {
     const kots = await this.prisma.kOTTicket.findMany({
-      where: { outletId, createdAt: { gte: range.fromDate, lte: range.toDate } },
-      select: { id: true, orderId: true },
+      where: {
+        outletId,
+        createdAt: { gte: range.fromDate, lte: range.toDate },
+        status: { not: "CANCELLED" },
+      },
+      select: { id: true, orderId: true, status: true },
     });
     if (kots.length === 0) return [];
 
@@ -176,11 +196,15 @@ export class PrismaReportingRepository implements ReportingRepository {
       select: { orderId: true },
     });
     const billedIds = new Set(billed.map((i) => i.orderId));
-    const completed = new Set(orders.filter((o) => (o as { status?: string }).status === "COMPLETED").map((o) => o.id));
+    const settledOrDead = new Set(
+      orders
+        .filter((o) => o.status === "COMPLETED" || o.status === "CANCELLED" || o.status === "FAILED")
+        .map((o) => o.id)
+    );
 
     const result: UnbilledKotRow[] = [];
     for (const kot of kots) {
-      if (billedIds.has(kot.orderId) || completed.has(kot.orderId)) continue;
+      if (billedIds.has(kot.orderId) || settledOrDead.has(kot.orderId)) continue;
       const order = orderById.get(kot.orderId);
       if (order) {
         result.push({
@@ -210,12 +234,16 @@ export class PrismaReportingRepository implements ReportingRepository {
       },
     });
 
-    return rows.map((row) => ({
-      subtotalMinor: row.subtotal ?? (row.grandTotal - (row.taxTotal ?? 0n)),
-      taxTotalMinor: row.taxTotal ?? 0n,
-      grandTotalMinor: row.grandTotal,
-      orderType: row.orderType,
-    }));
+    return rows.map((row) => {
+      const tax = row.taxTotal ?? 0n;
+      const exclusive = row.grandTotal - tax;
+      return {
+        subtotalMinor: exclusive >= 0n ? exclusive : (row.subtotal ?? 0n),
+        taxTotalMinor: tax,
+        grandTotalMinor: row.grandTotal,
+        orderType: row.orderType,
+      };
+    });
   }
 }
 

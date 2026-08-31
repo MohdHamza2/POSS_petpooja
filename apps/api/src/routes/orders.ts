@@ -95,7 +95,9 @@ ordersRouter.post("/orders", requireAuth, async (req: AuthedRequest, res) => {
       }
     }
 
-    if (diningTableId) {
+    const isHold = body.action === "HOLD";
+
+    if (diningTableId && !isHold) {
       const liveOnAnchor = await findLiveOrdersOnTables(prisma, outletId, [diningTableId]);
       const existingLive = liveOnAnchor[0];
       if (existingLive) {
@@ -140,7 +142,7 @@ ordersRouter.post("/orders", requireAuth, async (req: AuthedRequest, res) => {
       orderType: orderType as any,
       idempotencyKey,
       lines,
-      diningTableId,
+      diningTableId: isHold ? undefined : diningTableId,
       customerId: body.customerId || undefined,
       waiterId: body.waiterId || undefined,
     };
@@ -169,8 +171,21 @@ ordersRouter.post("/orders", requireAuth, async (req: AuthedRequest, res) => {
       }).catch(() => undefined);
     }
 
+    if (isHold) {
+      await prisma.order.update({
+        where: { id: result.id },
+        data: {
+          advanceStatus: "HELD",
+          diningTableId: diningTableId || undefined,
+          table_number: body.tableNumber ? String(body.tableNumber) : undefined,
+        },
+      });
+      // #region agent log
+      fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'A',location:'orders.ts:POST HOLD',message:'held draft created',data:{orderId:result.id,diningTableId:diningTableId||null,lineCount:lines.length,occupied:false},timestamp:Date.now(),runId:'wave3'})}).catch(()=>{});
+      // #endregion
+    }
     // If KOT creation requested (action: "KOT" or status: "ACTIVE" or "KOT_CREATED"):
-    if (body.action === "KOT" || body.status === "ACTIVE" || body.status === "KOT_CREATED") {
+    else if (body.action === "KOT" || body.status === "ACTIVE" || body.status === "KOT_CREATED") {
       if (!body.scheduledFireAt) {
         await transitionOrder(result.id, "CONFIRMED", orderRepo, req.auth!.userId);
         await transitionOrder(result.id, "KOT_CREATED", orderRepo, req.auth!.userId);
@@ -181,19 +196,25 @@ ordersRouter.post("/orders", requireAuth, async (req: AuthedRequest, res) => {
         await occupyMergeMembers(prisma, outletId, diningTableId);
         await stampOrderMergeLabel(prisma, outletId, result.id, diningTableId);
       }
+      // #region agent log
+      fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'W1',location:'orders.ts:POST KOT',message:'waiter/pos KOT created and table occupied',data:{orderId:result.id,orderNumber:result.orderNumber||null,diningTableId:diningTableId||null,tableNumber:body.tableNumber||null,lineCount:lines.length,action:body.action||null,status:body.status||null},timestamp:Date.now(),runId:'waiter-e2e'})}).catch(()=>{});
+      // #endregion
     }
     // If Bill / Immediate Settlement requested (action: "BILL" or isPaid: true or status: "COMPLETED"):
     else if (body.action === "BILL" || body.isPaid || body.status === "COMPLETED") {
       await transitionOrder(result.id, "CONFIRMED", orderRepo, req.auth!.userId);
       await onOrderConfirmed(result.id, prisma);
-      await settleOrderCommand(prisma, {
+      const billed = await settleOrderCommand(prisma, {
         outletId,
         orderId: result.id,
         userId: req.auth!.userId,
         paymentMethod: body.paymentMethod,
         amountPaidMinor: body.amountPaidMinor,
         payments: body.payments,
+        customerId: body.customerId,
       });
+      (result as any).invoiceNumber = billed.invoiceNumber;
+      (result as any).invoiceNumbers = billed.invoiceNumbers;
     }
 
     const orderDetail = await getOrderDetail(outletId, result.id, orderRepo);
@@ -205,18 +226,20 @@ ordersRouter.post("/orders", requireAuth, async (req: AuthedRequest, res) => {
       broadcast("order.created", {
         orderId: result.id,
         orderNumber: orderDetail?.orderNumber || "NEW",
-        tableId: diningTableId,
+        tableId: isHold ? null : diningTableId,
         status: orderDetail?.status || result.status,
       });
-      broadcast("kot.created", { orderId: result.id, diningTableId });
-      const occupyIds = createMembers.length > 0 ? createMembers : (diningTableId ? [diningTableId] : []);
-      for (const id of occupyIds) {
-        broadcast("table.status_updated", {
-          tableId: id,
-          orderId: result.id,
-          status: body.action === "BILL" ? "AVAILABLE" : "OCCUPIED",
-          stage: body.action === "KOT" ? "QUEUED" : undefined,
-        });
+      if (!isHold) {
+        broadcast("kot.created", { orderId: result.id, diningTableId });
+        const occupyIds = createMembers.length > 0 ? createMembers : (diningTableId ? [diningTableId] : []);
+        for (const id of occupyIds) {
+          broadcast("table.status_updated", {
+            tableId: id,
+            orderId: result.id,
+            status: body.action === "BILL" ? "AVAILABLE" : "OCCUPIED",
+            stage: body.action === "KOT" ? "QUEUED" : undefined,
+          });
+        }
       }
     }).catch(() => {});
 
@@ -230,6 +253,8 @@ ordersRouter.post("/orders", requireAuth, async (req: AuthedRequest, res) => {
       subtotalMinor: orderDetail ? String(orderDetail.subtotalMinor) : "0",
       diningTableId,
       items: orderDetail?.items || [],
+      invoiceNumber: (result as any).invoiceNumber || undefined,
+      invoiceNumbers: (result as any).invoiceNumbers || undefined,
     });
   } catch (err: any) {
     console.error("Error creating order:", err);
@@ -274,6 +299,7 @@ ordersRouter.get("/orders/live", requireAuth, async (req: AuthedRequest, res) =>
       where: {
         outletId,
         status: { in: ["DRAFT", "PLACED", "CONFIRMED", "KOT_CREATED", "IN_PREPARATION", "READY", "SERVED", "HANDED_OVER", "OUT_FOR_DELIVERY"] },
+        NOT: { advanceStatus: "HELD" },
       },
       include: {
         orderItems: true,
@@ -286,6 +312,54 @@ ordersRouter.get("/orders/live", requireAuth, async (req: AuthedRequest, res) =>
   } catch (err) {
     console.error("Error fetching live orders:", err);
     res.status(500).json({ error: "Failed to fetch live orders" });
+  }
+});
+
+ordersRouter.get("/orders/held", requireAuth, async (req: AuthedRequest, res) => {
+  try {
+    const outletId = req.auth!.outletId;
+    const held = await prisma.order.findMany({
+      where: {
+        outletId,
+        advanceStatus: "HELD",
+        status: { in: ["DRAFT", "PLACED"] },
+      },
+      include: {
+        orderItems: true,
+        diningTable: true,
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    const payload = held.map((ord) => {
+      const items = (ord.orderItems || []).filter((i) => !i.isVoided);
+      return {
+        id: ord.id,
+        orderNumber: ord.orderNumber,
+        tableNumber: ord.table_number || ord.diningTable?.tableNumber || "",
+        diningTableId: ord.diningTableId,
+        orderType: ord.orderType,
+        status: ord.status,
+        advanceStatus: ord.advanceStatus,
+        itemCount: items.reduce((sum, i) => sum + Number(i.quantity || 0), 0),
+        totalMinor: Number(ord.grandTotal || 0),
+        heldAt: ord.updatedAt || ord.createdAt,
+        items: items.map((i) => ({
+          id: i.id,
+          menuItemId: i.menuItemId,
+          name: i.item_name,
+          quantity: Number(i.quantity || 0),
+          unitPriceMinor: Number(i.unitPrice || 0),
+          notes: i.notes,
+        })),
+      };
+    });
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'A',location:'orders.ts:GET /held',message:'held list',data:{count:payload.length},timestamp:Date.now(),runId:'wave3'})}).catch(()=>{});
+    // #endregion
+    res.status(200).json(payload);
+  } catch (err) {
+    console.error("Error fetching held orders:", err);
+    res.status(500).json({ error: "Failed to fetch held orders" });
   }
 });
 
@@ -326,8 +400,15 @@ ordersRouter.get("/orders/:id", requireAuth, async (req: AuthedRequest, res) => 
     }
 
 
+    const extra = await prisma.order.findFirst({
+      where: { id: order.id, outletId },
+      select: { advanceStatus: true, table_number: true },
+    }).catch(() => null);
+
     res.status(200).json({
       ...order,
+      advanceStatus: extra?.advanceStatus || null,
+      tableNumber: extra?.table_number || null,
       grandTotalMinor: String(order.grandTotalMinor),
       subtotalMinor: String(order.subtotalMinor),
       taxTotalMinor: String(order.taxTotalMinor),
@@ -456,6 +537,10 @@ const handleRecordPayment = async (req: AuthedRequest, res: any) => {
     const order = await prisma.order.findUnique({
       where: { id: req.params.id },
     });
+
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'A',location:'orders.ts:handleRecordPayment',message:'POST /payments after recordPayment',data:{orderId:req.params.id,method,amount:String(amountMinor),orderStatus:order?.status||null,settledAt:order?.settledAt?true:false,tableNumber:order?.table_number||null},timestamp:Date.now(),runId:'hotel-p0'})}).catch(()=>{});
+    // #endregion
 
     res.status(201).json({
       ...payment,
@@ -588,9 +673,16 @@ ordersRouter.post("/orders/:id/settle", requireAuth, async (req: AuthedRequest, 
       paymentMethod: req.body.paymentMethod,
       amountPaidMinor: req.body.amountPaidMinor,
       payments: req.body.payments,
+      customerId: req.body.customerId,
     });
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'A',location:'orders.ts:POST /settle',message:'settle response',data:{orderId:req.params.id,alreadySettled:result.alreadySettled,status:result.status,invoiceNumber:result.invoiceNumber,invoiceNumbers:result.invoiceNumbers},timestamp:Date.now(),runId:'split-post'})}).catch(()=>{});
+    // #endregion
     res.status(200).json(result);
   } catch (err: any) {
+    if (err?.message === "ALREADY_SETTLED" || err?.code === "ALREADY_SETTLED") {
+      return res.status(409).json({ error: "Order already settled", code: "ALREADY_SETTLED" });
+    }
     console.error("Error settling order:", err);
     res.status(500).json({ error: err.message || "Failed to settle order" });
   }
@@ -607,9 +699,12 @@ ordersRouter.post("/orders/:id/hold", requireAuth, async (req: AuthedRequest, re
     }
     const updated = await prisma.order.update({
       where: { id: order.id },
-      data: { status: "DRAFT", advanceStatus: "HELD" },
+      data: { advanceStatus: "HELD" },
     });
-    res.status(200).json({ ok: true, orderId: updated.id, status: updated.status });
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'A',location:'orders.ts:POST /hold',message:'order parked',data:{orderId:updated.id,fromStatus:order.status},timestamp:Date.now(),runId:'wave3'})}).catch(()=>{});
+    // #endregion
+    res.status(200).json({ ok: true, orderId: updated.id, status: updated.status, advanceStatus: updated.advanceStatus });
   } catch (err: any) {
     res.status(500).json({ error: err.message || "Failed to hold order" });
   }
@@ -621,6 +716,10 @@ ordersRouter.post("/orders/:id/fire-advance", requireAuth, async (req: AuthedReq
     const outletId = req.auth!.outletId;
     const orderId = req.params.id;
 
+    const existing = await prisma.order.findFirst({
+      where: { id: orderId, outletId },
+    });
+    if (!existing) return res.status(404).json({ error: "Order not found" });
     await prisma.order.update({
       where: { id: orderId },
       data: { advanceStatus: "FIRED" },
@@ -628,6 +727,10 @@ ordersRouter.post("/orders/:id/fire-advance", requireAuth, async (req: AuthedReq
     await transitionOrder(orderId, "CONFIRMED", orderRepo, req.auth!.userId).catch(() => {});
     await transitionOrder(orderId, "KOT_CREATED", orderRepo, req.auth!.userId).catch(() => {});
     await onOrderConfirmed(orderId, prisma);
+    if (existing.diningTableId) {
+      await occupyMergeMembers(prisma, outletId, existing.diningTableId);
+      await stampOrderMergeLabel(prisma, outletId, orderId, existing.diningTableId);
+    }
 
     res.status(200).json({ ok: true, orderId, status: "KOT_CREATED" });
   } catch (err: any) {
@@ -660,6 +763,14 @@ ordersRouter.post("/orders/:id/cancel", requireAuth, async (req: AuthedRequest, 
     }
 
     await transitionOrder(orderId, "CANCELLED" as OrderStatus, orderRepo, userId, reason || reasonCode || "CUSTOMER_CANCELLED");
+
+    const kotCancel = await prisma.kOTTicket.updateMany({
+      where: { orderId, status: { not: "CANCELLED" } },
+      data: { status: "CANCELLED", updatedAt: new Date() },
+    });
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'L1',location:'orders.ts:cancel',message:'cancel also voids KOT tickets',data:{orderId,kotsCancelled:kotCancel.count},timestamp:Date.now(),runId:'tax-fix'})}).catch(()=>{});
+    // #endregion
 
     const dissolved = order.diningTableId
       ? await dissolveMergeGroupForTable(prisma, order.outletId, order.diningTableId)

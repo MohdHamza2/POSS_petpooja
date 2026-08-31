@@ -226,7 +226,7 @@ inventoryRouter.get("/recipes", requireAuth, requirePermission("inventory.read")
         id: rec.id,
         name: rec.name || (mi?.name ? `${mi.name} Recipe` : "Dish Recipe"),
         menuItemId: rec.menu_item_id,
-        version: 1,
+        version: rec.version ?? 1,
         isActive: rec.is_active ?? true,
         yieldPortions: Number(rec.yield_portions || 1),
         menuItem: mi ? {
@@ -266,12 +266,26 @@ inventoryRouter.post("/recipes", requireAuth, requirePermission("inventory.write
       name = "Recipe BOM";
     }
 
+    let nextVersion = 1;
+    if (menuItemId) {
+      const latest = await (prisma as any).recipes.findFirst({
+        where: { outlet_id: outletId, menu_item_id: menuItemId },
+        orderBy: [{ version: "desc" }, { created_at: "desc" }],
+      });
+      nextVersion = Number(latest?.version || 0) + 1;
+      await (prisma as any).recipes.updateMany({
+        where: { outlet_id: outletId, menu_item_id: menuItemId, is_active: true },
+        data: { is_active: false, updated_at: new Date(), updated_by: userId },
+      });
+    }
+
     const recipe = await (prisma as any).recipes.create({
       data: {
         outlet_id: outletId,
         name: String(name).trim(),
         menu_item_id: menuItemId || null,
         yield_portions: Number(yieldPortions || 1),
+        version: nextVersion,
         created_by: userId,
         updated_by: userId,
       },
@@ -406,6 +420,7 @@ inventoryRouter.get("/purchase-orders", requireAuth, requirePermission("inventor
         ingredientId: poi.ingredient_id,
         ingredientName: poi.ingredients.name,
         quantity: Number(poi.quantity),
+        receivedQty: Number(poi.received_qty || 0),
         unitPrice: Number(poi.unit_price_minor) / 100,
         total: Number(poi.total_minor) / 100,
       })),
@@ -506,7 +521,7 @@ inventoryRouter.post("/purchase-orders/:id/receive", requireAuth, requirePermiss
       return res.status(404).json({ error: "Purchase order not found" });
     }
 
-    if (po.status === "RECEIVED") {
+    if (po.purchase_order_items.every((item: any) => Number(item.received_qty || 0) >= Number(item.quantity || 0))) {
       return res.status(400).json({ error: "Purchase order has already been received" });
     }
 
@@ -580,6 +595,10 @@ inventoryRouter.post("/purchase-orders/:id/receive", requireAuth, requirePermiss
       },
     });
 
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'C',location:'inventory.ts:POST receive',message:'GRN receive applied',data:{poId,poNumber:po.po_number,nextStatus,receivedCount:receivedItems.length,addedQty:receivedItems.reduce((s,r)=>s+Number(r.addedQty||0),0)},timestamp:Date.now(),runId:'grn-pre'})}).catch(()=>{});
+    // #endregion
+
     res.status(200).json({
       ok: true,
       message: `Goods for ${po.po_number} received. Status ${nextStatus}.`,
@@ -610,8 +629,20 @@ inventoryRouter.get("/availability/export", requireAuth, requirePermission("inve
       orderBy: [{ category: { name: "asc" } }, { name: "asc" }],
     });
 
-    res.status(200).json(
-      items.map((it) => ({
+    const availabilityRows = await prisma.item_availability.findMany({
+      where: { outlet_id: outletId },
+      select: { item_id: true, state: true, version: true },
+    });
+    const availByItem = new Map<string, { state: string; version: number }>();
+    for (const row of availabilityRows) {
+      const prev = availByItem.get(row.item_id);
+      if (!prev || row.version >= prev.version) availByItem.set(row.item_id, { state: row.state, version: row.version });
+    }
+
+    const payload = items.map((it) => {
+      const avail = availByItem.get(it.id);
+      const isStocked = avail ? avail.state !== "OFF" : it.isActive !== false;
+      return {
         id: it.id,
         name: it.name,
         code: (it as any).code || "",
@@ -619,11 +650,16 @@ inventoryRouter.get("/availability/export", requireAuth, requirePermission("inve
         priceMinor: Math.round(Number(it.price || 0) * 100),
         priceFormatted: `₹${Number(it.price || 0).toFixed(2)}`,
         isVeg: it.isVeg,
-        isStocked: it.isActive ?? true,
-        stockQty: 100,
-        status: (it.isActive ?? true) ? "IN_STOCK" : "86_OUT_OF_STOCK",
-      }))
-    );
+        isStocked,
+        stockQty: isStocked ? 1 : 0,
+        status: isStocked ? "IN_STOCK" : "86_OUT_OF_STOCK",
+      };
+    });
+
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'C',location:'inventory.ts:GET availability/export',message:'export 86 from item_availability',data:{count:payload.length,offCount:payload.filter((i)=>!i.isStocked).length},timestamp:Date.now(),runId:'86-post'})}).catch(()=>{});
+    // #endregion
+    res.status(200).json(payload);
   } catch (error: any) {
     console.error("Error exporting availability:", error);
     res.status(500).json({ error: error.message });

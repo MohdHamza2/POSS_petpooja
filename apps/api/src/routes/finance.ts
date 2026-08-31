@@ -58,6 +58,9 @@ financeRouter.post("/settle", requireAuth, requirePermission("bill.settle"), asy
     });
     res.status(200).json(result);
   } catch (error: any) {
+    if (error?.message === "ALREADY_SETTLED" || error?.code === "ALREADY_SETTLED") {
+      return res.status(409).json({ error: "Order already settled", code: "ALREADY_SETTLED" });
+    }
     res.status(500).json({ error: error.message });
   }
 });
@@ -350,13 +353,23 @@ financeRouter.get("/cash-drawer", requireAuth, requirePermission("report.read"),
 
     const pettyCashTotalMinor = ledgerRows.reduce((sum, row) => sum + row.amount_minor, 0n);
     const openingFloatMinor = session?.opening_balance_minor ?? 0n;
-    const expectedCashMinor = session
-      ? session.expected_close_balance_minor
-      : openingFloatMinor + cashSalesMinor - cashRefundsMinor - pettyCashTotalMinor;
+    // DoD: expected cash is opening float + captured cash payments − refunds − petty.
+    // An OPEN session's running expected_close is updated on settle, but GET always
+    // recomputes from ledger rows so a mid-day open cannot hide earlier cash sales.
+    const expectedCashMinor =
+      openingFloatMinor + cashSalesMinor - cashRefundsMinor - pettyCashTotalMinor;
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'G',location:'finance.ts:cash-drawer-get',message:'cash drawer expected from ledger',data:{sessionStatus:session?.status||'NONE',opening:openingFloatMinor.toString(),cashSales:cashSalesMinor.toString(),petty:pettyCashTotalMinor.toString(),expected:expectedCashMinor.toString(),sessionExpected:session?session.expected_close_balance_minor.toString():null,cashTxCount:cashPayments.length},timestamp:Date.now(),runId:'post-fix'})}).catch(()=>{});
+    // #endregion
+
+    // Local calendar date of the queried day. Using startOfDay.toISOString()
+    // rolls back one day in positive-UTC-offset timezones (local midnight ->
+    // previous UTC evening), so format the local Y-M-D components instead.
+    const localDateStr = `${startOfDay.getFullYear()}-${String(startOfDay.getMonth() + 1).padStart(2, "0")}-${String(startOfDay.getDate()).padStart(2, "0")}`;
 
     res.status(200).json({
       outletId,
-      date: startOfDay.toISOString().split("T")[0],
+      date: localDateStr,
       sessionId: session?.id || null,
       sessionStatus: session?.status || "NONE",
       openingFloatMinor: openingFloatMinor.toString(),
@@ -448,12 +461,26 @@ financeRouter.post("/cash-drawer/open", requireAuth, requirePermission("report.r
       return res.status(409).json({ error: "A cash drawer session is already open", sessionId: existing.id });
     }
     const opening = BigInt(req.body.openingFloatMinor ?? req.body.opening_balance_minor ?? 0);
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay = new Date();
+    endOfDay.setHours(23, 59, 59, 999);
+    const cashToday = await prisma.payment.findMany({
+      where: { outletId, method: "CASH", status: "CAPTURED", createdAt: { gte: startOfDay, lte: endOfDay } },
+    });
+    const cashSalesMinor = cashToday.reduce((sum, p) => sum + p.amount, 0n);
+    const pettyToday = await prisma.petty_cash_ledger.aggregate({
+      where: { outlet_id: outletId, created_at: { gte: startOfDay, lte: endOfDay } },
+      _sum: { amount_minor: true },
+    });
+    const petty = pettyToday._sum.amount_minor ?? 0n;
+    const seededExpected = opening + cashSalesMinor - petty;
     const session = await prisma.cash_drawer_sessions.create({
       data: {
         outlet_id: outletId,
         opened_by: req.auth!.userId,
         opening_balance_minor: opening,
-        expected_close_balance_minor: opening,
+        expected_close_balance_minor: seededExpected,
         status: "OPEN",
         notes: req.body.notes || null,
       },
@@ -488,7 +515,20 @@ const handleReconcileShift = async (req: AuthedRequest, res: any) => {
     }
 
     const actualCounted = BigInt(counted);
-    const expectedCashMinor = session.expected_close_balance_minor;
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay = new Date();
+    endOfDay.setHours(23, 59, 59, 999);
+    const cashToday = await prisma.payment.findMany({
+      where: { outletId, method: "CASH", status: "CAPTURED", createdAt: { gte: startOfDay, lte: endOfDay } },
+    });
+    const cashSalesMinor = cashToday.reduce((sum, p) => sum + p.amount, 0n);
+    const pettyToday = await prisma.petty_cash_ledger.aggregate({
+      where: { outlet_id: outletId, created_at: { gte: startOfDay, lte: endOfDay } },
+      _sum: { amount_minor: true },
+    });
+    const expectedCashMinor =
+      session.opening_balance_minor + cashSalesMinor - (pettyToday._sum.amount_minor ?? 0n);
     const varianceMinor = actualCounted - expectedCashMinor;
 
     const closed = await prisma.cash_drawer_sessions.update({

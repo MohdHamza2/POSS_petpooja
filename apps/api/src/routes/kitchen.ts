@@ -210,8 +210,9 @@ router.patch("/kot/:kotTicketId/status", requireAuth, async (req: AuthedRequest,
           stage = "SERVED";
         } else {
           orderTargetStatus = null;
-          if (remaining.some((k) => k.status === "READY")) stage = "FOOD_READY";
+          if (remaining.some((k) => k.status === "QUEUED" || k.status === "KOT_CREATED" || k.status === "PENDING")) stage = "QUEUED";
           else if (remaining.some((k) => k.status === "PREPARING" || k.status === "COOKING" || k.status === "IN_PREPARATION")) stage = "COOKING";
+          else if (remaining.some((k) => k.status === "READY")) stage = "FOOD_READY";
           else stage = "QUEUED";
         }
       }
@@ -221,6 +222,9 @@ router.patch("/kot/:kotTicketId/status", requireAuth, async (req: AuthedRequest,
           console.error("KOT cascade transitionOrder failed:", err);
         });
       }
+      // #region agent log
+      fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'K1',location:'kitchen.ts:PATCH kot status',message:'KDS status cascade',data:{kotTicketId,toStatus:result.newStatus,orderId:ticket.orderId,orderTargetStatus,stage,tableId:ticket.order&&ticket.order.diningTableId},timestamp:Date.now(),runId:'chrome-kds'})}).catch(()=>{});
+      // #endregion
 
       import("../websockets").then(({ broadcast }) => {
         broadcast("kot.status_updated", { kotTicketId, status: result.newStatus });

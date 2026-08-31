@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import Head from "next/head";
 import Link from "next/link";
 import { authedFetch, useAuthGuard, logout } from "../lib/auth";
+import { existingOrResolvedCustomerId, fetchCustomerGuestFields, guestPhoneForForm } from "../lib/resolve-customer";
 import { useKapmetaSocket } from "../lib/useKapmetaSocket";
 import CaptainNavDrawer from "../components/CaptainNavDrawer";
 import UnsuccessfulKotModal from "../components/UnsuccessfulKotModal";
@@ -59,6 +60,7 @@ interface CartItem {
   notes: string;
   course: Course;
   seatNumber?: number | null;
+  modifierOptionIds?: string[];
 }
 
 interface KOTTicket {
@@ -81,6 +83,9 @@ interface OrderDetail {
   orderNumber: string;
   status: string;
   grandTotalMinor: string;
+  customerId?: string | null;
+  customerName?: string | null;
+  customerPhone?: string | null;
   items: {
     id: string;
     menuItemId: string;
@@ -225,6 +230,8 @@ export default function WaiterDashboard() {
   const [activeTable, setActiveTable] = useState<DiningTable | null>(null);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [coversCount, setCoversCount] = useState<number>(2);
+  const [guestPhone, setGuestPhone] = useState("");
+  const [guestName, setGuestName] = useState("");
   const [selectedCourse, setSelectedCourse] = useState<Course>("STARTER");
   const [selectedSeat, setSelectedSeat] = useState<number | null>(null);
   const [dietaryFilter, setDietaryFilter] = useState<DietaryFilter>("ALL");
@@ -549,6 +556,7 @@ export default function WaiterDashboard() {
         course: selectedCourse,
         seatNumber: selectedSeat,
         notes: customization.specialInstructions || "",
+        modifierOptionIds: customization.modifierOptionIds || [],
       },
     ]);
   };
@@ -601,7 +609,7 @@ export default function WaiterDashboard() {
     const lines = firing.map((ci) => ({
       menuItemId: ci.item.id,
       quantity: ci.quantity,
-      modifierOptionIds: [],
+      modifierOptionIds: ci.modifierOptionIds || [],
       notes: ci.notes || undefined,
       course: ci.course,
       seatNumber: ci.seatNumber ?? undefined,
@@ -614,6 +622,11 @@ export default function WaiterDashboard() {
       diningTableId: activeTable.mergePrimaryTableId || activeTable.id,
       tableNumber: activeTable.tableNumber,
       waiterId: me?.userId,
+      customerId: await existingOrResolvedCustomerId({
+        existingId: activeTable.currentOrderId ? manageOrder?.customerId : undefined,
+        phone: guestPhone,
+        name: guestName,
+      }),
       idempotencyKey,
       lines,
     };
@@ -635,6 +648,9 @@ export default function WaiterDashboard() {
       if (res.ok) {
         const created = await res.json();
         const orderId = created.id || existingOrderId;
+        // #region agent log
+        fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'W1',location:'waiter.tsx:submitOrder',message:'waiter KOT response ok',data:{orderId:orderId||null,orderNumber:created.orderNumber||null,table:activeTable.tableNumber,existingOrderId:existingOrderId||null,lineCount:lines.length,attachedToExisting:!!created.attachedToExisting,status:created.status||null},timestamp:Date.now(),runId:'waiter-e2e'})}).catch(()=>{});
+        // #endregion
         setCart((prev) => prev.filter((ci) => !firing.includes(ci)));
         if (courseFilter && !manageOrder && orderId) {
           const detailRes = await authedFetch(`/orders/${orderId}`);
@@ -648,6 +664,9 @@ export default function WaiterDashboard() {
       } else {
         const errData = await res.json().catch(() => ({}));
         setOrderError(errData.error || "Failed to place order");
+        // #region agent log
+        fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'W5',location:'waiter.tsx:submitOrder',message:'waiter KOT failed',data:{status:res.status,error:errData.error||null,table:activeTable.tableNumber,existingOrderId:existingOrderId||null},timestamp:Date.now(),runId:'waiter-e2e'})}).catch(()=>{});
+        // #endregion
       }
     } catch (e) {
       // Offline — queue it. idempotencyKey guarantees a later retry can't double-create.
@@ -720,6 +739,22 @@ export default function WaiterDashboard() {
       if (detailRes.ok) {
         const detail = await detailRes.json();
         setManageOrder(detail);
+        const name = String(detail.customerName || "").trim();
+        const phone = guestPhoneForForm(detail.customerPhone);
+        let hydratedName = name;
+        let hydratedPhone = phone;
+        if (detail.customerId && !hydratedName) {
+          const fields = await fetchCustomerGuestFields(detail.customerId);
+          if (fields) {
+            hydratedName = fields.name || hydratedName;
+            hydratedPhone = fields.phone || hydratedPhone;
+          }
+        }
+        // #region agent log
+        fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'G1',location:'waiter.tsx:openManageTable',message:'hydrate guest from running order',data:{hasCustomerId:Boolean(detail.customerId),hydratedName:Boolean(hydratedName),hydratedPhone:Boolean(hydratedPhone)},timestamp:Date.now(),runId:'guest-hydrate'})}).catch(()=>{});
+        // #endregion
+        if (hydratedName) setGuestName(hydratedName);
+        if (hydratedPhone) setGuestPhone(hydratedPhone);
       }
     } catch (e) {
       console.error("Failed to load table order", e);
@@ -745,7 +780,7 @@ export default function WaiterDashboard() {
     const lines = firing.map((ci) => ({
       menuItemId: ci.item.id,
       quantity: ci.quantity,
-      modifierOptionIds: [],
+      modifierOptionIds: ci.modifierOptionIds || [],
       notes: ci.notes || undefined,
       course: ci.course,
       seatNumber: ci.seatNumber ?? undefined,
@@ -758,6 +793,10 @@ export default function WaiterDashboard() {
         body: JSON.stringify({ lines }),
       });
       if (res.ok) {
+        const added = await res.json().catch(() => ({}));
+        // #region agent log
+        fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'W3',location:'waiter.tsx:submitAddItems',message:'waiter add-items ok',data:{orderId:manageOrder.id,lineCount:lines.length,status:added.status||null},timestamp:Date.now(),runId:'waiter-e2e'})}).catch(()=>{});
+        // #endregion
         setCart((prev) => prev.filter((ci) => !firing.includes(ci)));
         await refreshManageOrder();
         fetchKots();
@@ -945,13 +984,27 @@ export default function WaiterDashboard() {
         const settleRes = await authedFetch(`/orders/${bill.orderId}/settle`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ paymentMethod }),
+          body: JSON.stringify({
+            paymentMethod,
+            customerId: await existingOrResolvedCustomerId({
+                  existingId: manageOrder?.customerId,
+                  phone: guestPhone,
+                  name: guestName,
+                }),
+          }),
         });
-        await authedFetch(`/tables/${billTable.id}/vacant`, { method: "POST" }).catch(() => {});
-        setBillTable(null);
+        const vacantRes = await authedFetch(`/tables/${billTable.id}/vacant`, { method: "POST" }).catch(() => null);
+        if (vacantRes && vacantRes.ok) {
+          setBillTable(null);
+          showPickupNotification(settleRes.ok ? "Bill settled — table vacant" : "Settle failed");
+        } else {
+          const vacantErr = vacantRes ? await vacantRes.json().catch(() => ({})) : {};
+          showPickupNotification(
+            vacantErr.error || "Bill settled — kitchen still cooking, table stays occupied"
+          );
+        }
         fetchTables();
         fetchMyStats();
-        showPickupNotification(settleRes.ok ? "Bill settled — table vacant" : "Settle failed");
         setSubmittingPayment(false);
         return;
       }
@@ -969,17 +1022,31 @@ export default function WaiterDashboard() {
             const settleRes = await authedFetch(`/orders/${bill.orderId}/settle`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ paymentMethod }),
+              body: JSON.stringify({
+                paymentMethod,
+                customerId: await existingOrResolvedCustomerId({
+                  existingId: manageOrder?.customerId,
+                  phone: guestPhone,
+                  name: guestName,
+                }),
+              }),
             });
             if (!settleRes.ok) {
               const errData = await settleRes.json().catch(() => ({}));
               showPickupNotification(errData.error || "Paid, but settle failed");
             }
             const vacantRes = await authedFetch(`/tables/${billTable.id}/vacant`, { method: "POST" }).catch(() => null);
-            setBillTable(null);
+            if (vacantRes && vacantRes.ok) {
+              setBillTable(null);
+              showPickupNotification("Bill settled — table vacant");
+            } else {
+              const vacantErr = vacantRes ? await vacantRes.json().catch(() => ({})) : {};
+              showPickupNotification(
+                vacantErr.error || "Bill settled — kitchen still cooking, table stays occupied"
+              );
+            }
             fetchTables();
             fetchMyStats();
-            showPickupNotification("Bill settled — table vacant");
           }
         }
         if (splitBySeat) await loadSeatBills();
@@ -1053,7 +1120,7 @@ export default function WaiterDashboard() {
               <span className="font-extrabold text-blue-400 text-xs tracking-wider">PETPOOJA CAPTAIN</span>
               <span className="text-[10px] bg-amber-500/20 text-amber-400 font-bold px-1.5 py-0.5 rounded">cp4</span>
             </div>
-            <div className="text-[11px] text-slate-400 font-medium">{me?.outlet?.name || "Hotel kapila"}</div>
+            <div className="text-[11px] text-slate-400 font-medium">{me?.outlet?.name || "Outlet"}</div>
           </div>
         </div>
 
@@ -1181,6 +1248,20 @@ export default function WaiterDashboard() {
                   </button>
                   <span className="text-[11px] text-slate-400">Pax</span>
                 </div>
+                <input
+                  type="tel"
+                  className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-slate-200 w-[130px]"
+                  placeholder="Guest phone"
+                  value={guestPhone}
+                  onChange={(e) => setGuestPhone(e.target.value)}
+                />
+                <input
+                  type="text"
+                  className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-slate-200 w-[110px]"
+                  placeholder="Guest name"
+                  value={guestName}
+                  onChange={(e) => setGuestName(e.target.value)}
+                />
 
                 <div className="flex items-center bg-slate-950 border border-slate-800 p-1 rounded-xl gap-1">
                   <button
@@ -1963,6 +2044,22 @@ export default function WaiterDashboard() {
                   <div className="flex justify-between text-slate-200 font-bold text-sm"><span>Grand Total</span><span>₹{(Number(bill.grandTotalMinor) / 100).toFixed(2)}</span></div>
                   <div className="flex justify-between text-emerald-400"><span>Paid</span><span>₹{(Number(bill.paidMinor) / 100).toFixed(2)}</span></div>
                   <div className="flex justify-between text-rose-400 font-bold"><span>Due</span><span>₹{(Number(bill.dueMinor) / 100).toFixed(2)}</span></div>
+                </div>
+                <div className="flex gap-1.5">
+                  <input
+                    type="tel"
+                    className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-xs text-slate-200"
+                    placeholder="Guest phone (loyalty)"
+                    value={guestPhone}
+                    onChange={(e) => setGuestPhone(e.target.value)}
+                  />
+                  <input
+                    type="text"
+                    className="w-24 bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-xs text-slate-200"
+                    placeholder="Name"
+                    value={guestName}
+                    onChange={(e) => setGuestName(e.target.value)}
+                  />
                 </div>
 
                 <div className="flex gap-1.5 items-end border-b border-slate-800 pb-3">

@@ -102,7 +102,7 @@ function mapApiRow(row: AvailabilityApiRow): ItemAvailability {
   const name = row.name || "Dish";
   return {
     id,
-    stockQty: typeof row.stockQty === "number" ? row.stockQty : 100,
+    stockQty: typeof row.stockQty === "number" ? row.stockQty : (row.isStocked === false ? 0 : 1),
     isStocked: typeof row.isStocked === "boolean" ? row.isStocked : true,
     version: typeof row.version === "number" ? row.version : 1,
     category: row.categoryName || (row as any).category || "General",
@@ -244,6 +244,25 @@ export default function InventoryDashboard() {
     const set = new Set(items.map((i) => i.category));
     return ["All", ...Array.from(set)];
   }, [items]);
+
+  // Remaining stock on this tab should match BOM consumption. Orphan test SKUs
+  // (created, never linked to an active recipe) stay hidden unless staff asks.
+  const [showUnusedSkus, setShowUnusedSkus] = useState(false);
+  const bomIngredientIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const rec of recipes) {
+      if (rec.isActive === false) continue;
+      for (const line of rec.recipeIngredients || []) {
+        if (line.ingredientId) ids.add(line.ingredientId);
+      }
+    }
+    return ids;
+  }, [recipes]);
+  const visibleIngredients = useMemo(
+    () => (showUnusedSkus ? ingredients : ingredients.filter((ing) => bomIngredientIds.has(ing.id))),
+    [ingredients, showUnusedSkus, bomIngredientIds]
+  );
+  const unusedSkuCount = ingredients.filter((ing) => !bomIngredientIds.has(ing.id)).length;
 
   const patchAvailability = async (id: string, isStocked: boolean, stockQty: number, expectedVersion: number) => {
     // Optimistically update local state immediately
@@ -473,10 +492,10 @@ export default function InventoryDashboard() {
       alert("No dishes found to export.");
       return;
     }
-    const lines = ["Dish Name,Category,Price,Status,Available Portions"];
+    const lines = ["Dish Name,Category,Price,Status"];
     for (const it of listToExport) {
       const statusText = it.isStocked ? "IN_STOCK" : "86_OUT_OF_STOCK";
-      lines.push(`"${it.menuItem.name}","${it.category}","${it.menuItem.priceFormatted}","${statusText}",${it.stockQty}`);
+      lines.push(`"${it.menuItem.name}","${it.category}","${it.menuItem.priceFormatted}","${statusText}"`);
     }
     const csvContent = lines.join("\n");
     const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
@@ -614,22 +633,10 @@ export default function InventoryDashboard() {
                   </div>
 
                   <div className="flex items-center justify-between border-t border-slate-800 pt-3 mt-2">
-                    <span className="text-xs text-slate-400">Available Portions:</span>
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        onClick={() => patchAvailability(item.id, item.isStocked, Math.max(0, item.stockQty - 1), item.version)}
-                        className="w-6 h-6 bg-slate-800 hover:bg-slate-700 rounded text-xs font-bold"
-                      >
-                        −
-                      </button>
-                      <span className="text-xs font-bold px-2">{item.stockQty}</span>
-                      <button
-                        onClick={() => patchAvailability(item.id, item.isStocked, item.stockQty + 1, item.version)}
-                        className="w-6 h-6 bg-slate-800 hover:bg-slate-700 rounded text-xs font-bold"
-                      >
-                        +
-                      </button>
-                    </div>
+                    <span className="text-xs text-slate-400">POS / channel 86</span>
+                    <span className={`text-[10px] font-bold uppercase ${item.isStocked ? "text-emerald-400" : "text-rose-400"}`}>
+                      {item.isStocked ? "Sellable" : "86'd off"}
+                    </span>
                   </div>
                 </div>
               ))}
@@ -643,14 +650,28 @@ export default function InventoryDashboard() {
             <div className="flex justify-between items-center bg-slate-900 border border-slate-800 p-3 rounded-xl">
               <div>
                 <h2 className="text-sm font-bold text-slate-100">Raw Material Inventory</h2>
-                <p className="text-[11px] text-slate-400">Track raw bulk items deducted via Recipe BOMs</p>
+                <p className="text-[11px] text-slate-400">
+                  Stock for ingredients on an active recipe BOM
+                  {unusedSkuCount > 0 ? ` · ${unusedSkuCount} unused SKU${unusedSkuCount === 1 ? "" : "s"} hidden` : ""}
+                </p>
               </div>
-              <button
-                onClick={() => setShowAddIngModal(true)}
-                className="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5"
-              >
-                <span>+</span> Add Raw Material
-              </button>
+              <div className="flex items-center gap-2">
+                {unusedSkuCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowUnusedSkus((v) => !v)}
+                    className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-1.5 rounded-lg text-xs font-bold transition"
+                  >
+                    {showUnusedSkus ? "Hide unused SKUs" : "Show unused SKUs"}
+                  </button>
+                )}
+                <button
+                  onClick={() => setShowAddIngModal(true)}
+                  className="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5"
+                >
+                  <span>+</span> Add Raw Material
+                </button>
+              </div>
             </div>
 
             <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
@@ -667,14 +688,16 @@ export default function InventoryDashboard() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/60 text-slate-300">
-                  {ingredients.length === 0 ? (
+                  {visibleIngredients.length === 0 ? (
                     <tr>
                       <td colSpan={7} className="p-6 text-center text-slate-500">
-                        No raw ingredients configured. Click "+ Add Raw Material" above.
+                        {ingredients.length === 0
+                          ? "No raw ingredients configured. Click \"+ Add Raw Material\" above."
+                          : "No ingredients are linked to an active recipe. Show unused SKUs or add a BOM."}
                       </td>
                     </tr>
                   ) : (
-                    ingredients.map((ing) => {
+                    visibleIngredients.map((ing) => {
                       const isLow = ing.currentStock <= ing.reorderLevel;
                       return (
                         <tr key={ing.id} className="hover:bg-slate-800/40 transition">
@@ -832,7 +855,16 @@ export default function InventoryDashboard() {
                     </div>
                   ) : (
                     purchaseOrders.map((po) => {
-                      const isReceived = po.status === "RECEIVED";
+                      const lines = po.items || [];
+                      const isReceived = lines.length > 0 && lines.every((it: any) => Number(it.receivedQty || 0) >= Number(it.quantity || 0));
+                      const receivedSome = lines.some((it: any) => Number(it.receivedQty || 0) > 0);
+                      const displayStatus = isReceived
+                        ? "RECEIVED"
+                        : receivedSome
+                          ? "PARTIALLY_RECEIVED"
+                          : po.status === "RECEIVED"
+                            ? "PENDING"
+                            : po.status;
                       return (
                         <div key={po.id} className="bg-slate-950 p-4 rounded-xl border border-slate-800 flex flex-col gap-3">
                           <div className="flex justify-between items-start">
@@ -844,7 +876,7 @@ export default function InventoryDashboard() {
                                     ? "bg-emerald-950 text-emerald-400 border-emerald-500/30" 
                                     : "bg-indigo-950 text-indigo-400 border-indigo-500/30"
                                 }`}>
-                                  {po.status}
+                                  {displayStatus}
                                 </span>
                               </div>
                               <p className="text-xs text-slate-400 mt-0.5">Supplier: <strong>{(po as any).vendorName || po.vendor?.name || "Vendor"}</strong> • {new Date(po.createdAt).toLocaleDateString()}</p>
@@ -861,7 +893,7 @@ export default function InventoryDashboard() {
                             <div className="bg-slate-900/60 p-2.5 rounded-lg border border-slate-800/60 flex flex-col gap-1 text-xs">
                               {po.items.map((it, idx) => (
                                 <div key={idx} className="flex justify-between text-slate-300">
-                                  <span>{it.quantity}x {(it as any).ingredientName || it.ingredient?.name || "Raw Material"}</span>
+                                  <span>{it.quantity}x {(it as any).ingredientName || it.ingredient?.name || "Raw Material"} {typeof (it as any).receivedQty === "number" ? `(recv ${(it as any).receivedQty})` : ""}</span>
                                   <span className="font-mono text-slate-400">@ ₹{(it as any).unitPrice || it.unitCost} = ₹{((it as any).total || it.totalCost || (it.quantity * ((it as any).unitPrice || it.unitCost || 0))).toFixed(2)}</span>
                                 </div>
                               ))}

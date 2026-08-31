@@ -391,6 +391,7 @@ model KOTItem {
 
   @@index([menuItemId], map: "idx_kot_items_menu_item")
   @@index([kotTicketId], map: "idx_kot_items_ticket")
+  @@index([orderItemId], map: "idx_kot_items_order_item")
   @@map("kot_items")
 }
 
@@ -1116,7 +1117,8 @@ model vendors {
 model Invoice {
   id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   outletId         String   @map("outlet_id") @db.Uuid
-  orderId          String   @unique @map("order_id") @db.Uuid
+  orderId          String   @map("order_id") @db.Uuid
+  splitIndex       Int      @default(0) @map("split_index")
   invoiceNumber    String   @map("invoice_number") @db.VarChar(64)
   amountMinor      BigInt   @map("amount_minor")
   taxAmountMinor   BigInt   @default(0) @map("tax_amount_minor")
@@ -1126,6 +1128,7 @@ model Invoice {
   createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   order            Order    @relation(fields: [orderId], references: [id])
 
+  @@unique([orderId, splitIndex], map: "uq_invoices_order_split")
   @@unique([outletId, invoiceNumber])
   @@index([outletId], map: "idx_invoices_outlet")
   @@map("invoices")

@@ -11,6 +11,7 @@ export interface SettleOrderInput {
   paymentMethod?: string;
   amountPaidMinor?: bigint | string | number;
   payments?: { method: string; amountMinor: bigint | string | number }[];
+  customerId?: string;
 }
 
 export interface SettleOrderResult {
@@ -18,6 +19,7 @@ export interface SettleOrderResult {
   orderId: string;
   status: string;
   invoiceNumber: string;
+  invoiceNumbers: string[];
   alreadySettled: boolean;
 }
 
@@ -27,6 +29,7 @@ const DINE_CHAIN: OrderStatus[] = [
   "IN_PREPARATION",
   "READY",
   "SERVED",
+  "HANDED_OVER",
   "COMPLETED",
 ];
 
@@ -62,6 +65,58 @@ async function nextInvoiceNumber(prisma: PrismaClient, outletId: string): Promis
   return `INV-${year}-${String(count + 1).padStart(5, "0")}`;
 }
 
+async function orderHasUnservedKot(prisma: PrismaClient, orderId: string): Promise<boolean> {
+  const n = await prisma.kOTTicket.count({
+    where: { orderId, status: { notIn: ["SERVED", "CANCELLED"] } },
+  });
+  return n > 0;
+}
+
+async function writeInvoicesForPayments(
+  prisma: PrismaClient,
+  outletId: string,
+  orderId: string,
+  grandTotal: bigint,
+  taxTotal: bigint
+) {
+  const existing = await prisma.invoice.findMany({
+    where: { orderId },
+    orderBy: { splitIndex: "asc" },
+  });
+  if (existing.length > 0) return existing;
+
+  const recorded = await prisma.payment.findMany({
+    where: { orderId, outletId, status: "CAPTURED" },
+    orderBy: { createdAt: "asc" },
+  });
+  const slices = recorded.length > 0
+    ? recorded.map((p) => p.amount)
+    : [grandTotal];
+
+  const created = [];
+  let taxAllocated = 0n;
+  for (let i = 0; i < slices.length; i++) {
+    const isLast = i === slices.length - 1;
+    const amount = slices[i];
+    const tax = isLast
+      ? taxTotal - taxAllocated
+      : (grandTotal > 0n ? (taxTotal * amount) / grandTotal : 0n);
+    taxAllocated += tax;
+    const invoiceNumber = await nextInvoiceNumber(prisma, outletId);
+    created.push(await prisma.invoice.create({
+      data: {
+        outletId,
+        orderId,
+        splitIndex: i,
+        invoiceNumber,
+        amountMinor: amount,
+        taxAmountMinor: tax < 0n ? 0n : tax,
+      },
+    }));
+  }
+  return created;
+}
+
 export async function settleOrderCommand(
   prisma: PrismaClient,
   input: SettleOrderInput
@@ -77,36 +132,41 @@ export async function settleOrderCommand(
     throw new Error("Order not found");
   }
 
-  const existingInvoice = await prisma.invoice.findUnique({ where: { orderId } }).catch(() => null);
+  const existingInvoices = await prisma.invoice.findMany({
+    where: { orderId },
+    orderBy: { splitIndex: "asc" },
+  });
+  if (order.settledAt && existingInvoices.length > 0) {
+    const err = new Error("ALREADY_SETTLED");
+    (err as Error & { code?: string }).code = "ALREADY_SETTLED";
+    throw err;
+  }
   if (order.status === "COMPLETED") {
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'B',location:'settle-order.ts:alreadySettled',message:'settle hit COMPLETED branch',data:{orderId,settledAt:order.settledAt?true:false,hasInvoice:existingInvoices.length>0,invoiceCount:existingInvoices.length,tableId:order.diningTableId||null,tableNumber:order.table_number||null},timestamp:Date.now(),runId:'post-fix'})}).catch(()=>{});
+    // #endregion
 
     const existingPays = await prisma.payment.findMany({
       where: { orderId, outletId, status: "CAPTURED" },
     });
     const alreadyPaid = existingPays.reduce((sum, p) => sum + p.amount, 0n);
-    let invoice = existingInvoice;
-    if (!invoice) {
-      const invoiceNumber = await nextInvoiceNumber(prisma, outletId);
-      invoice = await prisma.invoice.create({
-        data: {
-          outletId,
-          orderId,
-          invoiceNumber,
-          amountMinor: order.grandTotal,
-          taxAmountMinor: order.taxTotal ?? 0n,
-        },
-      });
-    }
+    const invoices = existingInvoices.length > 0
+      ? existingInvoices
+      : await writeInvoicesForPayments(prisma, outletId, orderId, order.grandTotal, order.taxTotal ?? 0n);
+    const invoice = invoices[0];
     if (!order.settledAt) {
       await prisma.order.update({
         where: { id: orderId },
         data: { settledAt: new Date() },
       });
     }
-    const dissolved = order.diningTableId
-      ? await dissolveMergeGroupForTable(prisma, outletId, order.diningTableId)
-      : { ids: [] as string[], numbers: [] as string[] };
-    if (dissolved.ids.length === 0 && order.table_number) {
+    const cooking = await orderHasUnservedKot(prisma, orderId);
+    const dissolved = cooking
+      ? { ids: [] as string[], numbers: [] as string[] }
+      : (order.diningTableId
+        ? await dissolveMergeGroupForTable(prisma, outletId, order.diningTableId)
+        : { ids: [] as string[], numbers: [] as string[] });
+    if (!cooking && dissolved.ids.length === 0 && order.table_number) {
       await prisma.diningTable.updateMany({
         where: { outletId, tableNumber: order.table_number },
         data: { status: "VACANT", mergeGroupId: null, mergePrimaryTableId: null },
@@ -128,11 +188,13 @@ export async function settleOrderCommand(
         invoiceNumber: invoice!.invoiceNumber,
       });
       broadcast("table.unmerged", { tableIds: dissolved.ids, orderId });
-      const vacantIds = dissolved.ids.length > 0
-        ? dissolved.ids
-        : (order.diningTableId ? [order.diningTableId] : []);
-      for (const id of vacantIds) {
-        broadcast("table.status_updated", { tableId: id, orderId, status: "VACANT" });
+      if (!cooking) {
+        const vacantIds = dissolved.ids.length > 0
+          ? dissolved.ids
+          : (order.diningTableId ? [order.diningTableId] : []);
+        for (const id of vacantIds) {
+          broadcast("table.status_updated", { tableId: id, orderId, status: "VACANT" });
+        }
       }
       if (bom.deductedCount > 0) {
         broadcast("inventory.stock_updated", { orderId, deductedCount: bom.deductedCount });
@@ -143,11 +205,20 @@ export async function settleOrderCommand(
       orderId,
       status: "COMPLETED",
       invoiceNumber: invoice.invoiceNumber,
+      invoiceNumbers: invoices.map((inv) => inv.invoiceNumber),
       alreadySettled: true,
     };
   }
   if (order.status === "CANCELLED" || order.status === "FAILED") {
     throw new Error(`Cannot settle order in status ${order.status}`);
+  }
+
+  if (input.customerId && !order.customerId) {
+    await prisma.order.update({
+      where: { id: orderId },
+      data: { customerId: input.customerId },
+    });
+    order.customerId = input.customerId;
   }
 
   const isTakeaway = order.orderType === "PICKUP" || String(order.orderType) === "TAKEAWAY";
@@ -187,6 +258,9 @@ export async function settleOrderCommand(
     if (chunk <= 0n) continue;
     await orderRepo.recordPayment(outletId, orderId, chunk, p.method, userId);
     remainingToRecord += chunk;
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'B',location:'settle-order.ts:recordChunk',message:'settle recording payment chunk',data:{orderId,method:p.method,chunk:chunk.toString(),remainingToRecord:remainingToRecord.toString(),grandTotal:order.grandTotal.toString()},timestamp:Date.now(),runId:'hotel-p0'})}).catch(()=>{});
+    // #endregion
     if (String(p.method).toUpperCase() === "CASH") {
       const activeDrawer = await prisma.cash_drawer_sessions.findFirst({
         where: { outlet_id: outletId, status: "OPEN" },
@@ -204,29 +278,57 @@ export async function settleOrderCommand(
     }
   }
 
-  let invoice = await prisma.invoice.findUnique({ where: { orderId } });
-  if (!invoice) {
-    const invoiceNumber = await nextInvoiceNumber(prisma, outletId);
-    invoice = await prisma.invoice.create({
-      data: {
-        outletId,
-        orderId,
-        invoiceNumber,
-        amountMinor: order.grandTotal,
-        taxAmountMinor: order.taxTotal ?? 0n,
-      },
+  const preexistingCash = existingPays
+    .filter((p) => String(p.method).toUpperCase() === "CASH")
+    .reduce((sum, p) => sum + p.amount, 0n);
+  if (preexistingCash > 0n) {
+    const activeDrawer = await prisma.cash_drawer_sessions.findFirst({
+      where: { outlet_id: outletId, status: "OPEN" },
+      orderBy: { opened_at: "desc" },
     });
+    if (activeDrawer) {
+      await prisma.cash_drawer_sessions.update({
+        where: { id: activeDrawer.id },
+        data: {
+          expected_close_balance_minor: { increment: preexistingCash },
+          updated_at: new Date(),
+        },
+      });
+    }
   }
+
+  const invoices = await writeInvoicesForPayments(
+    prisma,
+    outletId,
+    orderId,
+    order.grandTotal,
+    order.taxTotal ?? 0n
+  );
+  const invoice = invoices[0];
+  const invoiceSum = invoices.reduce((s, inv) => s + inv.amountMinor, 0n);
+  const invoiceTaxSum = invoices.reduce((s, inv) => s + inv.taxAmountMinor, 0n);
+  // #region agent log
+  fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'A',location:'settle-order.ts:invoice-write',message:'invoice vs payments after settle',data:{orderId,paymentInputCount:splitPays.length,invoiceCount:invoices.length,invoiceNumbers:invoices.map((inv) => inv.invoiceNumber),invoiceAmounts:invoices.map((inv) => inv.amountMinor.toString()),grandTotal:order.grandTotal.toString()},timestamp:Date.now(),runId:'split-post'})}).catch(()=>{});
+  fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'T2',location:'settle-order.ts:sync-totals',message:'sync order totals to invoices',data:{orderId,grandBefore:order.grandTotal.toString(),invoiceSum:invoiceSum.toString(),invoiceTaxSum:invoiceTaxSum.toString(),willSyncTotals:invoiceSum!==order.grandTotal},timestamp:Date.now(),runId:'tax-fix'})}).catch(()=>{});
+  // #endregion
 
   await prisma.order.update({
     where: { id: orderId },
-    data: { settledAt: new Date() },
+    data: {
+      settledAt: new Date(),
+      grandTotal: invoiceSum,
+      subtotal: invoiceSum,
+      taxTotal: invoiceTaxSum,
+    },
   });
 
-  const dissolved = order.diningTableId
-    ? await dissolveMergeGroupForTable(prisma, outletId, order.diningTableId)
-    : { ids: [] as string[], numbers: [] as string[] };
-  if (dissolved.ids.length === 0 && order.table_number) {
+  const cooking = await orderHasUnservedKot(prisma, orderId);
+  const dissolved = cooking
+    ? { ids: [] as string[], numbers: [] as string[] }
+    : (order.diningTableId
+      ? await dissolveMergeGroupForTable(prisma, outletId, order.diningTableId)
+      : { ids: [] as string[], numbers: [] as string[] });
+  if (!cooking && dissolved.ids.length === 0 && order.table_number) {
     await prisma.diningTable.updateMany({
       where: { outletId, tableNumber: order.table_number },
       data: { status: "VACANT", mergeGroupId: null, mergePrimaryTableId: null },
@@ -234,13 +336,19 @@ export async function settleOrderCommand(
   }
 
   const bom = await deductBomStockForOrder(orderId, outletId, prisma, userId, "ORDER_SETTLED");
+  // #region agent log
+  fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'H',location:'settle-order.ts:loyalty',message:'loyalty branch',data:{orderId,hasCustomerId:Boolean(order.customerId),payAmount:payAmount.toString(),grandTotal:order.grandTotal.toString(),bomDeducted:bom.deductedCount,paisePerPoint:null,runId:'post-fix'},timestamp:Date.now(),runId:'post-fix'})}).catch(()=>{});
+  // #endregion
 
   if (order.customerId) {
     const outlet = await prisma.outlet.findUnique({ where: { id: outletId } });
     const paisePerPoint = outlet?.loyaltyPaisePerPoint;
-    if (paisePerPoint && paisePerPoint > 0n) {
-      const pointsEarned = Number(payAmount / paisePerPoint);
-      if (pointsEarned > 0) {
+    const loyaltyBase = invoiceSum;
+    const pointsEarned = paisePerPoint && paisePerPoint > 0n ? Number(loyaltyBase / paisePerPoint) : 0;
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'H',location:'settle-order.ts:loyalty-award',message:'loyalty award',data:{orderId,customerId:order.customerId,paisePerPoint:paisePerPoint!=null?paisePerPoint.toString():null,loyaltyBase:loyaltyBase.toString(),pointsEarned},timestamp:Date.now(),runId:'post-fix'})}).catch(()=>{});
+    // #endregion
+    if (pointsEarned > 0) {
         await prisma.customer.update({
           where: { id: order.customerId },
           data: { loyaltyPoints: { increment: pointsEarned } },
@@ -254,7 +362,6 @@ export async function settleOrderCommand(
             tier: "SILVER",
           },
         }).catch(() => undefined);
-      }
     }
   }
 
@@ -273,18 +380,20 @@ export async function settleOrderCommand(
       amountMinor: payAmount.toString(),
       invoiceNumber: invoice!.invoiceNumber,
     });
-    broadcast("table.status_updated", {
-      tableId: order.diningTableId,
-      orderId,
-      status: "VACANT",
-    });
-    for (const id of dissolved.ids) {
-      if (id !== order.diningTableId) {
-        broadcast("table.status_updated", { tableId: id, orderId, status: "VACANT" });
+    if (!cooking) {
+      broadcast("table.status_updated", {
+        tableId: order.diningTableId,
+        orderId,
+        status: "VACANT",
+      });
+      for (const id of dissolved.ids) {
+        if (id !== order.diningTableId) {
+          broadcast("table.status_updated", { tableId: id, orderId, status: "VACANT" });
+        }
       }
-    }
-    if (dissolved.ids.length > 0) {
-      broadcast("table.unmerged", { tableIds: dissolved.ids, orderId });
+      if (dissolved.ids.length > 0) {
+        broadcast("table.unmerged", { tableIds: dissolved.ids, orderId });
+      }
     }
     if (bom.deductedCount > 0) {
       broadcast("inventory.stock_updated", { orderId, deductedCount: bom.deductedCount });
@@ -296,6 +405,7 @@ export async function settleOrderCommand(
     orderId,
     status: "COMPLETED",
     invoiceNumber: invoice.invoiceNumber,
+    invoiceNumbers: invoices.map((inv) => inv.invoiceNumber),
     alreadySettled: false,
   };
 }

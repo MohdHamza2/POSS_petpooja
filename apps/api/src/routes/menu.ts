@@ -255,7 +255,61 @@ router.post("/modifier-options", requireAuth, requirePermission("menu.item.manag
     const catalogRepository = new PrismaMenuCatalogRepository(prisma);
     const option = await catalogRepository.createModifierOption(outletId, modifierGroupId, name, BigInt(priceMinor));
 
-    res.status(201).json({ ...option, price: String(option.price) });
+    res.status(201).json({
+      id: option.id,
+      name: option.name,
+      priceMinor: option.price_delta_minor.toString(),
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "internal error" });
+  }
+});
+
+router.get("/items/:menuItemId/modifiers", requireAuth, requirePermission("menu.read"), async (req: AuthedRequest, res) => {
+  try {
+    const outletId = req.auth!.outletId;
+    const menuItemId = req.params.menuItemId;
+    const links = await prisma.item_modifier_groups.findMany({
+      where: { outlet_id: outletId, item_id: menuItemId },
+      orderBy: { sort_order: "asc" },
+    });
+    const groupIds = links.map((l) => l.group_id);
+    const groups = groupIds.length
+      ? await prisma.modifierGroup.findMany({
+          where: { id: { in: groupIds }, outletId, is_active: true },
+        })
+      : [];
+    const options = groupIds.length
+      ? await prisma.modifiers.findMany({
+          where: { group_id: { in: groupIds }, outlet_id: outletId, is_active: true },
+          orderBy: { name: "asc" },
+        })
+      : [];
+    const groupById = new Map(groups.map((g) => [g.id, g]));
+    const payload = links
+      .map((link) => {
+        const group = groupById.get(link.group_id);
+        if (!group) return null;
+        return {
+          id: group.id,
+          name: group.name,
+          minSelect: group.minSelect,
+          maxSelect: group.maxSelect,
+          options: options
+            .filter((o) => o.group_id === group.id)
+            .map((o) => ({
+              id: o.id,
+              name: o.name,
+              priceMinor: Number(o.price_delta_minor || 0),
+            })),
+        };
+      })
+      .filter(Boolean);
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'D',location:'menu.ts:GET modifiers',message:'item modifiers',data:{menuItemId,groupCount:payload.length,optionCount:options.length},timestamp:Date.now(),runId:'wave3'})}).catch(()=>{});
+    // #endregion
+    res.status(200).json(payload);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "internal error" });
@@ -265,7 +319,11 @@ router.post("/modifier-options", requireAuth, requirePermission("menu.item.manag
 router.post("/items/:menuItemId/modifiers/:modifierGroupId", requireAuth, requirePermission("menu.item.manage"), async (req: AuthedRequest, res) => {
   try {
     const catalogRepository = new PrismaMenuCatalogRepository(prisma);
-    const link = await catalogRepository.linkModifierToItem(req.params.menuItemId, req.params.modifierGroupId);
+    const link = await catalogRepository.linkModifierToItem(
+      req.auth!.outletId,
+      req.params.menuItemId,
+      req.params.modifierGroupId
+    );
 
     res.status(201).json(link);
   } catch (err) {
@@ -297,6 +355,12 @@ router.get("/availability", requireAuth, requirePermission("menu.read"), async (
       orderBy: { name: "asc" },
     });
 
+    const modifierLinks = await prisma.item_modifier_groups.findMany({
+      where: { outlet_id: outletId },
+      select: { item_id: true },
+    });
+    const itemsWithModifiers = new Set(modifierLinks.map((l) => l.item_id));
+
     const availabilityRows = await prisma.item_availability.findMany({
       where: { outlet_id: outletId },
     });
@@ -311,7 +375,7 @@ router.get("/availability", requireAuth, requirePermission("menu.read"), async (
     res.status(200).json(
       menuItems.map((item) => {
         const avail = availByItem.get(item.id);
-        const isStocked = avail ? avail.state !== "OFF" : item.isActive;
+        const isStocked = avail ? avail.state !== "OFF" : item.isActive !== false;
         return {
           id: item.id,
           menuItemId: item.id,
@@ -323,6 +387,8 @@ router.get("/availability", requireAuth, requirePermission("menu.read"), async (
           version: avail?.version ?? 1,
           priceMinor: Math.round(Number(item.price || 0) * 100).toString(),
           isVeg: item.isVeg,
+          taxRate: Number(item.taxRate ?? 0),
+          hasModifiers: itemsWithModifiers.has(item.id),
         };
       })
     );

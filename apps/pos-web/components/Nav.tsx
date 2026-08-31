@@ -122,7 +122,7 @@ export default function Nav({ variant = "pill" }: NavProps): JSX.Element | null 
       if (cancelled) return;
       setPermissions(me ? me.permissions : []);
       setCurrentOutlet(me ? me.outlet : null);
-    });
+    }).catch(() => undefined);
     fetchMyOutlets().then((outlets) => {
       if (cancelled) return;
       setMyOutlets(outlets);

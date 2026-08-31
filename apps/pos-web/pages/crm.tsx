@@ -54,6 +54,47 @@ export default function CrmPage() {
   const [directoryLoaded, setDirectoryLoaded] = useState(false);
 
   const canWrite = me?.permissions.includes("crm.write") ?? false;
+  const [loyaltyPaise, setLoyaltyPaise] = useState("");
+  const [gstin, setGstin] = useState("");
+  const [outletSaveMsg, setOutletSaveMsg] = useState<string | null>(null);
+  const [outletSaving, setOutletSaving] = useState(false);
+
+  useEffect(() => {
+    if (authLoading || !me) return;
+    authedFetch("/settings/outlet")
+      .then(async (res) => {
+        if (!res.ok) return;
+        const data = await res.json();
+        setLoyaltyPaise(data.loyaltyPaisePerPoint != null ? String(data.loyaltyPaisePerPoint) : "");
+        setGstin(data.taxNumber || "");
+      })
+      .catch(() => undefined);
+  }, [authLoading, me]);
+
+  const saveOutletSettings = (e: React.FormEvent) => {
+    e.preventDefault();
+    setOutletSaving(true);
+    setOutletSaveMsg(null);
+    authedFetch("/settings/outlet", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loyaltyPaisePerPoint: loyaltyPaise.trim() === "" ? null : loyaltyPaise.trim(),
+        taxNumber: gstin.trim() === "" ? null : gstin.trim(),
+      }),
+    })
+      .then(async (res) => {
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error || "Failed to save outlet settings");
+        }
+        setOutletSaveMsg("Saved. New settles use this loyalty rate and GSTIN.");
+      })
+      .catch((err) => {
+        setOutletSaveMsg(err instanceof Error ? err.message : "Save failed");
+      })
+      .finally(() => setOutletSaving(false));
+  };
 
   const runLookup = (id: string) => {
     if (!id.trim()) return;
@@ -362,6 +403,40 @@ export default function CrmPage() {
                 </div>
               )}
             </section>
+
+            {canWrite && (
+              <section className="panel-card">
+                <div className="panel-header">
+                  <div>
+                    <h3>Outlet loyalty & GSTIN</h3>
+                    <p className="panel-sub">
+                      Paise spent per 1 loyalty point (10000 = ₹100 per point). GSTIN prints on receipts.
+                    </p>
+                  </div>
+                </div>
+                <form className="create-form" onSubmit={saveOutletSettings}>
+                  <input
+                    type="number"
+                    min={1}
+                    className="text-input"
+                    placeholder="Paise per point"
+                    value={loyaltyPaise}
+                    onChange={(e) => setLoyaltyPaise(e.target.value)}
+                  />
+                  <input
+                    type="text"
+                    className="text-input"
+                    placeholder="GSTIN"
+                    value={gstin}
+                    onChange={(e) => setGstin(e.target.value)}
+                  />
+                  <button type="submit" className="export-btn" disabled={outletSaving}>
+                    {outletSaving ? "Saving..." : "Save"}
+                  </button>
+                </form>
+                {outletSaveMsg && <p className="panel-sub">{outletSaveMsg}</p>}
+              </section>
+            )}
 
             {canWrite ? (
               <section className="panel-card">

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import Head from "next/head";
 import { useRouter } from "next/router";
-import { useAuthGuard } from "../lib/auth";
+import { useAuthGuard, getSession } from "../lib/auth";
 import PetPoojaHeader from "../components/PetPoojaHeader";
 import TableViewFloor from "../components/TableViewFloor";
 import PosBillingView from "../components/PosBillingView";
@@ -11,8 +11,8 @@ export default function POSIndexPage() {
   const router = useRouter();
 
   const outlet = me?.outlet ?? null;
-  const outletName = outlet?.name || (authLoading ? "Loading..." : "Hotel Kapila");
-  const outletCode = outlet?.taxNumber ? `R${outlet.taxNumber.slice(0, 6)}` : "R327038";
+  const outletName = outlet?.name || (authLoading ? "Loading..." : "Outlet");
+  const outletCode = outlet?.code || "";
 
   // Check router query to see if we should display billing or floor
   const [viewMode, setViewMode] = useState<"FLOOR" | "BILLING">("FLOOR");
@@ -89,7 +89,11 @@ export default function POSIndexPage() {
           initialTable={selectedTable}
           initialTableId={selectedTableId}
           initialMode={selectedOrderMode}
+          resumeHoldId={typeof router.query.resumeHold === "string" ? router.query.resumeHold : ""}
           onBackToTables={() => {
+            // #region agent log
+            fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'K3',location:'index.tsx:onBackToTables',message:'Done back to floor',data:{hasSession:Boolean(getSession()),path:typeof window!=='undefined'?window.location.pathname:null},timestamp:Date.now(),runId:'cover-0029'})}).catch(()=>{});
+            // #endregion
             setViewMode("FLOOR");
             router.push("/", undefined, { shallow: true });
           }}

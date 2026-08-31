@@ -207,11 +207,27 @@ export default function KitchenMonitor() {
 
     setUpdatingId(ticketId);
     try {
+      // #region agent log
+      {
+        let tokenLen = 0;
+        let expiresAt: string | null = null;
+        try {
+          const raw = window.localStorage.getItem("kapmeta_pos_session");
+          const parsed = raw ? JSON.parse(raw) : null;
+          tokenLen = typeof parsed?.accessToken === "string" ? parsed.accessToken.length : 0;
+          expiresAt = parsed?.expiresAt ?? null;
+        } catch { /* ignore */ }
+        fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'K5',location:'kitchen.tsx:updateStatus',message:'KDS status click before PATCH',data:{ticketId,currentStatus,nextStatus,tokenLen,expiresAt},timestamp:Date.now(),runId:'cover-0029'})}).catch(()=>{});
+      }
+      // #endregion
       const res = await authedFetch(`/kitchen/kot/${ticketId}/status`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ toStatus: nextStatus }),
       });
+      // #region agent log
+      fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'K5',location:'kitchen.tsx:updateStatus',message:'KDS PATCH response',data:{ticketId,nextStatus,ok:res.ok,status:res.status},timestamp:Date.now(),runId:'cover-0029'})}).catch(()=>{});
+      // #endregion
       if (res.ok) {
         // Server keeps a just-SERVED ticket in the feed for the recall grace
         // window, so we mirror that locally instead of dropping it — the

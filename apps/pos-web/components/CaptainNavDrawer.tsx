@@ -21,7 +21,7 @@ interface CaptainNavDrawerProps {
 export default function CaptainNavDrawer({
   isOpen,
   onClose,
-  outletName = "Hotel Kapila",
+  outletName = "Outlet",
   stationCode = "cp4",
   appVersion = "V 15.0.0 (2009)",
   staffName,

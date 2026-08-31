@@ -1,6 +1,12 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { useRouter } from "next/router";
-import { authedFetch } from "../lib/auth";
+import { authedFetch, fetchMe } from "../lib/auth";
+import { extractInclusiveTaxMinor } from "../lib/inclusive-tax";
+import {
+  existingOrResolvedCustomerId,
+  fetchCustomerGuestFields,
+  guestPhoneForForm,
+} from "../lib/resolve-customer";
 import { useKapmetaSocket } from "../lib/useKapmetaSocket";
 import BillSplitModal from "./BillSplitModal";
 import AttractiveMenuItemCard, { MenuItemData } from "./menu/AttractiveMenuItemCard";
@@ -17,6 +23,7 @@ interface MenuItem {
   isStocked: boolean;
   stockQty: number;
   hasModifiers?: boolean;
+  taxRate: number;
 }
 
 interface CartItem {
@@ -26,6 +33,7 @@ interface CartItem {
   itemTotalMinor: number;
   notes?: string;
   checked?: boolean;
+  modifierOptionIds?: string[];
 }
 
 interface RunningOrderItem {
@@ -42,6 +50,7 @@ interface PosBillingViewProps {
   initialTable?: string;
   initialTableId?: string;
   initialMode?: "DINE_IN" | "DELIVERY" | "PICKUP";
+  resumeHoldId?: string;
   onBackToTables?: () => void;
 }
 
@@ -49,6 +58,7 @@ export default function PosBillingView({
   initialTable = "B6",
   initialTableId = "",
   initialMode = "DINE_IN",
+  resumeHoldId = "",
   onBackToTables,
 }: PosBillingViewProps) {
   const router = useRouter();
@@ -84,6 +94,13 @@ export default function PosBillingView({
   const [isPaidChecked, setIsPaidChecked] = useState(false);
   const [isSplitModalOpen, setIsSplitModalOpen] = useState(false);
   const [processingOrder, setProcessingOrder] = useState(false);
+  const [guestPhone, setGuestPhone] = useState("");
+  const [guestName, setGuestName] = useState("");
+  const [outletProfile, setOutletProfile] = useState<{
+    name: string;
+    address: string | null;
+    taxNumber: string | null;
+  } | null>(null);
 
   // Modals & Feedback
   const [receiptModal, setReceiptModal] = useState<any | null>(null);
@@ -93,7 +110,16 @@ export default function PosBillingView({
   useEffect(() => {
     loadMenu();
     loadActiveTableOrder();
-  }, [initialTableId, initialTable]);
+    fetchMe().then((me) => {
+      if (me?.outlet) {
+        setOutletProfile({
+          name: me.outlet.name,
+          address: me.outlet.address,
+          taxNumber: me.outlet.taxNumber,
+        });
+      }
+    }).catch(() => undefined);
+  }, [initialTableId, initialTable, resumeHoldId]);
 
   useKapmetaSocket(
     () => {
@@ -118,6 +144,7 @@ export default function PosBillingView({
           isVeg: it.isVeg ?? true,
           isStocked: typeof it.isStocked === "boolean" ? it.isStocked : (it.availability ? it.availability.isStocked : true),
           stockQty: typeof it.stockQty === "number" ? it.stockQty : (it.availability ? it.availability.stockQty : 100),
+          taxRate: Number(it.taxRate || 0),
         }));
 
         setCatalog(items);
@@ -135,7 +162,57 @@ export default function PosBillingView({
     }
   };
 
+  const applyOrderToBilling = (ord: any) => {
+    setActiveOrder(ord);
+    if (ord.items && Array.isArray(ord.items)) {
+      setRunningItems(
+        ord.items.map((it: any) => ({
+          id: it.id,
+          menuItemName: it.menuItemName || it.item_name || it.name,
+          quantity: it.quantity,
+          unitPriceMinor: Number(it.unitPriceMinor || it.unitPrice || 0),
+          subtotalMinor: Number(it.subtotalMinor || it.subtotal || (it.quantity * it.unitPriceMinor) || 0),
+          status: it.status || (ord.advanceStatus === "HELD" ? "HELD" : "KOT_SENT"),
+          notes: it.notes,
+        }))
+      );
+    }
+    void hydrateGuestFromOrder(ord);
+  };
+
+  const hydrateGuestFromOrder = async (ord: any) => {
+    const hasCustomerId = Boolean(ord?.customerId);
+    let name = String(ord?.customerName || "").trim();
+    let phone = guestPhoneForForm(ord?.customerPhone);
+    if (hasCustomerId && !name) {
+      const fields = await fetchCustomerGuestFields(ord.customerId);
+      if (fields) {
+        name = fields.name || name;
+        phone = fields.phone || phone;
+      }
+    }
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'G1',location:'PosBillingView.tsx:hydrateGuestFromOrder',message:'hydrate guest from running order',data:{hasCustomerId,hydratedName:Boolean(name),hydratedPhone:Boolean(phone)},timestamp:Date.now(),runId:'guest-hydrate'})}).catch(()=>{});
+    // #endregion
+    if (name) setGuestName(name);
+    if (phone) setGuestPhone(phone);
+  };
+
+  const loadHeldOrder = async (orderId: string) => {
+    const ordRes = await authedFetch(`/orders/${orderId}`);
+    if (!ordRes.ok) return;
+    const ord = await ordRes.json();
+    applyOrderToBilling(ord);
+    if (ord.tableNumber || ord.table_number) {
+      setTableNumber(String(ord.tableNumber || ord.table_number));
+    }
+  };
+
   const loadActiveTableOrder = async () => {
+    if (resumeHoldId) {
+      await loadHeldOrder(resumeHoldId);
+      return;
+    }
     if (!initialTableId && !initialTable) return;
     try {
       const res = await authedFetch("/tables");
@@ -149,21 +226,7 @@ export default function PosBillingView({
           if (matched.activeOrderId) {
             const ordRes = await authedFetch(`/orders/${matched.activeOrderId}`);
             if (ordRes.ok) {
-              const ord = await ordRes.json();
-              setActiveOrder(ord);
-              if (ord.items && Array.isArray(ord.items)) {
-                setRunningItems(
-                  ord.items.map((it: any) => ({
-                    id: it.id,
-                    menuItemName: it.menuItemName || it.item_name || it.name,
-                    quantity: it.quantity,
-                    unitPriceMinor: Number(it.unitPriceMinor || it.unitPrice || 0),
-                    subtotalMinor: Number(it.subtotalMinor || it.subtotal || (it.quantity * it.unitPriceMinor) || 0),
-                    status: it.status || "KOT_SENT",
-                    notes: it.notes,
-                  }))
-                );
-              }
+              applyOrderToBilling(await ordRes.json());
             }
 
             // Also load KOT tickets for granular multi-wave display
@@ -196,21 +259,7 @@ export default function PosBillingView({
               const live = await byTable.json();
               const ordRes = await authedFetch(`/orders/${live.id}`);
               if (ordRes.ok) {
-                const ord = await ordRes.json();
-                setActiveOrder(ord);
-                if (ord.items && Array.isArray(ord.items)) {
-                  setRunningItems(
-                    ord.items.map((it: any) => ({
-                      id: it.id,
-                      menuItemName: it.menuItemName || it.item_name || it.name,
-                      quantity: it.quantity,
-                      unitPriceMinor: Number(it.unitPriceMinor || it.unitPrice || 0),
-                      subtotalMinor: Number(it.subtotalMinor || it.subtotal || (it.quantity * it.unitPriceMinor) || 0),
-                      status: it.status || "KOT_SENT",
-                      notes: it.notes,
-                    }))
-                  );
-                }
+                applyOrderToBilling(await ordRes.json());
               }
             } else {
               setActiveOrder(null);
@@ -332,36 +381,92 @@ export default function PosBillingView({
     [cart]
   );
   const totalSubtotalMinor = runningSubtotalMinor + cartSubtotalMinor;
-  const taxMinor = useMemo(() => Math.round(totalSubtotalMinor * 0.05), [totalSubtotalMinor]); // 5% GST
-  const grandTotalMinor = totalSubtotalMinor + taxMinor;
+  const taxMinor = useMemo(() => {
+    const cartTax = cart.reduce(
+      (sum, c) => sum + extractInclusiveTaxMinor(c.itemTotalMinor, c.item.taxRate),
+      0
+    );
+    const runningTax = runningItems.reduce((sum, r) => {
+      const cat = catalog.find((i) => i.name === r.menuItemName);
+      return sum + extractInclusiveTaxMinor(r.subtotalMinor, cat?.taxRate ?? 0);
+    }, 0);
+    return cartTax + runningTax;
+  }, [cart, runningItems, catalog]);
+  const grandTotalMinor = totalSubtotalMinor;
+  const displayTaxRate = useMemo(() => {
+    const rates = [
+      ...cart.map((c) => c.item.taxRate),
+      ...runningItems.map((r) => catalog.find((i) => i.name === r.menuItemName)?.taxRate ?? 0),
+    ].filter((r) => r > 0);
+    if (rates.length === 0) return 0;
+    const first = rates[0];
+    return rates.every((r) => r === first) ? first : 0;
+  }, [cart, runningItems, catalog]);
 
-  const handleHoldCart = () => {
-    if (cart.length === 0 && runningItems.length === 0) {
-      alert("Cart is empty.");
+  const cartLines = () =>
+    cart.map((c) => ({
+      menuItemId: c.item.id,
+      quantity: c.quantity,
+      unitPriceMinor: c.item.priceMinor,
+      notes: c.notes || undefined,
+      modifierOptionIds: c.modifierOptionIds || [],
+    }));
+
+  const handleHoldCart = async () => {
+    if (cart.length === 0) {
+      alert("Add items to the cart before holding. Kitchen tickets on a running table stay on the table.");
       return;
     }
-    const heldOrder = {
-      id: `hold_${Date.now()}`,
-      tableNumber,
-      orderType: orderMode,
-      itemCount: cart.reduce((s, c) => s + c.quantity, 0) + runningItems.reduce((s, r) => s + r.quantity, 0),
-      totalMinor: grandTotalMinor,
-      heldAt: new Date().toISOString(),
-      cart,
-    };
+    setProcessingOrder(true);
     try {
-      const stored = JSON.parse(localStorage.getItem("petpooja_held_orders") || "[]");
-      stored.push(heldOrder);
-      localStorage.setItem("petpooja_held_orders", JSON.stringify(stored));
+      const payload = {
+        action: "HOLD",
+        orderType: orderMode,
+        tableNumber,
+        diningTableId: initialTableId || undefined,
+        customerId: await existingOrResolvedCustomerId({ existingId: activeOrder?.customerId, phone: guestPhone, name: guestName }),
+        lines: cartLines(),
+      };
+      const res = await authedFetch("/orders", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.error || "Failed to hold order");
+      }
       setCart([]);
-      alert(`Order for Table ${tableNumber} is held/parked.`);
-    } catch (e) {
-      console.error(e);
+      alert(`Order for Table ${tableNumber} is parked. Resume it from Hold in the header.`);
+    } catch (e: any) {
+      alert(e.message || "Failed to hold order");
+    } finally {
+      setProcessingOrder(false);
     }
   };
 
   const handleKotAndPrint = async () => {
+    const parked = activeOrder && (activeOrder.advanceStatus === "HELD" || activeOrder.status === "DRAFT" || activeOrder.status === "PLACED");
     if (cart.length === 0) {
+      if (parked && activeOrder?.id) {
+        setProcessingOrder(true);
+        try {
+          const fireRes = await authedFetch(`/orders/${activeOrder.id}/fire-advance`, { method: "POST" });
+          if (!fireRes.ok) {
+            const errJson = await fireRes.json().catch(() => ({}));
+            throw new Error(errJson.error || "Failed to send held order to kitchen");
+          }
+          setKotFeedback({
+            orderNumber: activeOrder.orderNumber || "KOT",
+            items: runningItems.map((r) => `${r.quantity}x ${r.menuItemName}`),
+          });
+          await loadActiveTableOrder();
+        } catch (err: any) {
+          alert(err.message || "Failed to create KOT");
+        } finally {
+          setProcessingOrder(false);
+        }
+        return;
+      }
       if (runningItems.length > 0) {
         setKotFeedback({
           orderNumber: activeOrder?.orderNumber || "KOT",
@@ -378,26 +483,20 @@ export default function PosBillingView({
       let orderNum = "KOT-NEW";
 
       if (activeOrder?.id) {
-        // Append items to existing order
         const res = await authedFetch(`/orders/${activeOrder.id}/items`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            lines: cart.map((c) => ({
-              menuItemId: c.item.id,
-              quantity: c.quantity,
-              unitPriceMinor: c.item.priceMinor,
-              notes: c.notes || undefined,
-            })),
-          }),
+          body: JSON.stringify({ lines: cartLines() }),
         });
         if (!res.ok) {
           const errJson = await res.json().catch(() => ({}));
           throw new Error(errJson.error || "Failed to add items to active order");
         }
+        if (parked) {
+          await authedFetch(`/orders/${activeOrder.id}/fire-advance`, { method: "POST" });
+        }
         orderNum = activeOrder.orderNumber;
       } else {
-        // Create new order with KOT
         const payload = {
           action: "KOT",
           orderType: orderMode,
@@ -405,12 +504,8 @@ export default function PosBillingView({
           diningTableId: initialTableId || undefined,
           covers: coversCount,
           waiterName,
-          lines: cart.map((c) => ({
-            menuItemId: c.item.id,
-            quantity: c.quantity,
-            unitPriceMinor: c.item.priceMinor,
-            notes: c.notes || undefined,
-          })),
+          customerId: await existingOrResolvedCustomerId({ existingId: activeOrder?.customerId, phone: guestPhone, name: guestName }),
+          lines: cartLines(),
           status: "KOT_CREATED",
         };
 
@@ -455,6 +550,11 @@ export default function PosBillingView({
       ];
 
       let orderNumber = activeOrder?.orderNumber || "INV-001";
+      const customerId = await existingOrResolvedCustomerId({
+        existingId: activeOrder?.customerId,
+        phone: guestPhone,
+        name: guestName,
+      });
 
       if (activeOrder?.id) {
         // If there are staged cart items, append them first
@@ -463,12 +563,7 @@ export default function PosBillingView({
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              lines: cart.map((c) => ({
-                menuItemId: c.item.id,
-                quantity: c.quantity,
-                unitPriceMinor: c.item.priceMinor,
-                notes: c.notes || undefined,
-              })),
+              lines: cartLines(),
             }),
           });
           if (!addRes.ok) {
@@ -484,6 +579,7 @@ export default function PosBillingView({
           body: JSON.stringify({
             paymentMethod,
             amountPaidMinor: grandTotalMinor,
+            customerId,
           }),
         });
 
@@ -491,6 +587,14 @@ export default function PosBillingView({
           const errJson = await settleRes.json().catch(() => ({}));
           throw new Error(errJson.error || "Failed to settle order");
         }
+        const settleData = await settleRes.json().catch(() => ({} as any));
+        const invoiceLabel = Array.isArray(settleData.invoiceNumbers) && settleData.invoiceNumbers.length > 0
+          ? settleData.invoiceNumbers.join(" + ")
+          : (settleData.invoiceNumber || orderNumber);
+        orderNumber = invoiceLabel;
+        // #region agent log
+        fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'R1',location:'PosBillingView.tsx:handlePrintAndEBill',message:'print settle invoice label',data:{invoiceLabel,invoiceNumbers:settleData.invoiceNumbers||null,invoiceNumber:settleData.invoiceNumber||null,orderId:activeOrder.id},timestamp:Date.now(),runId:'waiter-e2e'})}).catch(()=>{});
+        // #endregion
       } else {
         // Create and settle new order
         const payload = {
@@ -502,12 +606,8 @@ export default function PosBillingView({
           waiterName,
           paymentMethod,
           isPaid: true,
-          lines: cart.map((c) => ({
-            menuItemId: c.item.id,
-            quantity: c.quantity,
-            unitPriceMinor: c.item.priceMinor,
-            notes: c.notes || undefined,
-          })),
+          customerId,
+          lines: cartLines(),
           subtotalMinor: totalSubtotalMinor,
           taxTotalMinor: taxMinor,
           grandTotalMinor,
@@ -524,7 +624,10 @@ export default function PosBillingView({
         }
 
         const resData = await res.json();
-        orderNumber = resData.orderNumber || "INV-001";
+        const billedLabel = Array.isArray(resData.invoiceNumbers) && resData.invoiceNumbers.length > 0
+          ? resData.invoiceNumbers.join(" + ")
+          : (resData.invoiceNumber || resData.orderNumber || "INV-001");
+        orderNumber = billedLabel;
       }
 
       setReceiptModal({
@@ -548,6 +651,122 @@ export default function PosBillingView({
     }
   };
 
+  // Wires the Split Bill modal to the real settle pipeline. The backend
+  // accepts a payments[] array on POST /orders/:id/settle (each { method,
+  // amountMinor }); an EQUAL split becomes N payment rows that sum exactly to
+  // the bill total (last row absorbs the rounding remainder). Previously this
+  // only fired an alert() and never settled.
+  const handleConfirmSplit = async (details: { splitType: string; numGuests: number; perGuestMinor: number }) => {
+    setIsSplitModalOpen(false);
+    setProcessingOrder(true);
+    try {
+      let orderId = activeOrder?.id;
+      if (!orderId) {
+        if (cart.length === 0) {
+          alert("Add items before splitting the bill.");
+          return;
+        }
+        const createRes = await authedFetch("/orders", {
+          method: "POST",
+          body: JSON.stringify({
+            action: "KOT",
+            orderType: orderMode,
+            tableNumber,
+            diningTableId: initialTableId || undefined,
+            covers: coversCount,
+            waiterName,
+            customerId: await existingOrResolvedCustomerId({ existingId: activeOrder?.customerId, phone: guestPhone, name: guestName }),
+            lines: cartLines(),
+          }),
+        });
+        if (!createRes.ok) {
+          const e = await createRes.json().catch(() => ({}));
+          throw new Error(e.error || "Failed to create order for split");
+        }
+        orderId = (await createRes.json()).id;
+      } else if (cart.length > 0) {
+        const addRes = await authedFetch(`/orders/${orderId}/items`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            lines: cartLines(),
+          }),
+        });
+        if (!addRes.ok) {
+          const e = await addRes.json().catch(() => ({}));
+          throw new Error(e.error || "Failed to append items before split");
+        }
+      }
+
+      const total = grandTotalMinor;
+      const n = Math.max(1, details.numGuests || 1);
+      const method = paymentMethod && paymentMethod !== "DUE" ? paymentMethod : "CASH";
+      const payments: { method: string; amountMinor: number }[] = [];
+      if (details.splitType === "EQUAL") {
+        const base = Math.floor(total / n);
+        for (let i = 0; i < n; i++) {
+          payments.push({ method, amountMinor: i === n - 1 ? total - base * (n - 1) : base });
+        }
+      } else {
+        const lineTotals = [
+          ...runningItems.map((r) => r.subtotalMinor),
+          ...cart.map((c) => c.itemTotalMinor),
+        ];
+        const lineSum = lineTotals.reduce((s, v) => s + v, 0);
+        if (lineTotals.length < 2 || lineSum <= 0) {
+          const base = Math.floor(total / 2);
+          payments.push({ method, amountMinor: base }, { method, amountMinor: total - base });
+        } else {
+          const mid = Math.ceil(lineTotals.length / 2);
+          const firstShare = lineTotals.slice(0, mid).reduce((s, v) => s + v, 0);
+          const first = Math.min(total, Math.round((firstShare / lineSum) * total));
+          payments.push({ method, amountMinor: first }, { method, amountMinor: total - first });
+        }
+      }
+
+      const settleRes = await authedFetch(`/orders/${orderId}/settle`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          payments,
+          customerId: await existingOrResolvedCustomerId({ existingId: activeOrder?.customerId, phone: guestPhone, name: guestName }),
+        }),
+      });
+      if (!settleRes.ok) {
+        const e = await settleRes.json().catch(() => ({}));
+        throw new Error(e.error || "Failed to settle split bill");
+      }
+      const settleData = await settleRes.json().catch(() => ({} as any));
+      const invoiceLabel = Array.isArray(settleData.invoiceNumbers) && settleData.invoiceNumbers.length > 0
+        ? settleData.invoiceNumbers.join(" + ")
+        : (settleData.invoiceNumber || activeOrder?.orderNumber || "SPLIT");
+      // #region agent log
+      fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'E',location:'PosBillingView.tsx:handleConfirmSplit',message:'split settle response',data:{orderId,paymentCount:payments.length,invoiceLabel,invoiceNumbers:settleData.invoiceNumbers||null,invoiceNumber:settleData.invoiceNumber||null},timestamp:Date.now(),runId:'chrome-split'})}).catch(()=>{});
+      // #endregion
+
+      setReceiptModal({
+        orderNumber: invoiceLabel,
+        tableNumber,
+        paymentMethod: `${method} · Split ${payments.length}`,
+        totalSubtotalMinor,
+        taxMinor,
+        grandTotalMinor: total,
+        items: [
+          ...runningItems.map((r) => ({ name: r.menuItemName, qty: r.quantity, price: r.subtotalMinor })),
+          ...cart.map((c) => ({ name: c.item.name, qty: c.quantity, price: c.itemTotalMinor })),
+        ],
+        createdAt: new Date().toISOString(),
+      });
+      setCart([]);
+      setRunningItems([]);
+      setActiveOrder(null);
+    } catch (err: any) {
+      alert(err.message || "Failed to split bill");
+    } finally {
+      setProcessingOrder(false);
+    }
+  };
+
   const addCustomizedToCart = (item: MenuItemData, customization: CustomizedItemSelection) => {
     const customizedName = `${item.name} (${customization.portion === "HALF" ? "Half" : customization.portion === "FULL" ? "Full" : "Reg"}${customization.addons.length > 0 ? " + " + customization.addons.map((a) => a.name).join(", ") : ""})`;
     const customItem: MenuItem = {
@@ -558,6 +777,7 @@ export default function PosBillingView({
       isVeg: item.isVeg,
       isStocked: item.isStocked ?? true,
       stockQty: item.stockQty ?? 100,
+      taxRate: catalog.find((c) => c.id === item.id)?.taxRate ?? 0,
     };
 
     setCart((prev) => [
@@ -568,6 +788,7 @@ export default function PosBillingView({
         quantity: 1,
         itemTotalMinor: customization.finalPriceMinor,
         notes: customization.specialInstructions || undefined,
+        modifierOptionIds: customization.modifierOptionIds || [],
         checked: true,
       },
     ]);
@@ -721,6 +942,24 @@ export default function PosBillingView({
                 <span>🧑‍🍳</span>
                 <span>{waiterName}</span>
               </div>
+              <input
+                type="tel"
+                className="covers-input"
+                style={{ width: "110px" }}
+                placeholder="Guest phone"
+                value={guestPhone}
+                onChange={(e) => setGuestPhone(e.target.value)}
+                title="Phone for CRM loyalty"
+              />
+              <input
+                type="text"
+                className="covers-input"
+                style={{ width: "90px" }}
+                placeholder="Name"
+                value={guestName}
+                onChange={(e) => setGuestName(e.target.value)}
+                title="Guest name"
+              />
             </div>
           </div>
 
@@ -996,10 +1235,7 @@ export default function PosBillingView({
           totalMinor={grandTotalMinor}
           cart={cart}
           onClose={() => setIsSplitModalOpen(false)}
-          onConfirmSplit={(splits) => {
-            alert(`Bill Split into ${splits.length} parts. Total: ₹${(grandTotalMinor / 100).toFixed(2)}`);
-            setIsSplitModalOpen(false);
-          }}
+          onConfirmSplit={handleConfirmSplit}
         />
       )}
 
@@ -1061,9 +1297,13 @@ export default function PosBillingView({
           <div className="modal-dialog-card receipt-card" onClick={(e) => e.stopPropagation()}>
             <div className="receipt-paper">
               <div className="receipt-header">
-                <h3 style={{ margin: 0, fontWeight: 900 }}>HOTEL KAPILA</h3>
-                <div style={{ fontSize: "0.75rem", color: "#64748b" }}>GSTIN: 27AAAAA0000A1Z5</div>
-                <div style={{ fontSize: "0.75rem", color: "#64748b" }}>Main Branch, Pune</div>
+                <h3 style={{ margin: 0, fontWeight: 900 }}>{outletProfile?.name || "Outlet"}</h3>
+                {outletProfile?.taxNumber ? (
+                  <div style={{ fontSize: "0.75rem", color: "#64748b" }}>GSTIN: {outletProfile.taxNumber}</div>
+                ) : null}
+                {outletProfile?.address ? (
+                  <div style={{ fontSize: "0.75rem", color: "#64748b" }}>{outletProfile.address}</div>
+                ) : null}
                 <div className="receipt-divider">================================</div>
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8125rem", fontWeight: 700 }}>
                   <span>Table: {receiptModal.tableNumber}</span>
@@ -1088,15 +1328,15 @@ export default function PosBillingView({
 
               <div className="receipt-totals">
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8125rem" }}>
-                  <span>Subtotal:</span>
+                  <span>Subtotal (incl. GST):</span>
                   <span>₹{(receiptModal.totalSubtotalMinor / 100).toFixed(2)}</span>
                 </div>
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "#64748b" }}>
-                  <span>CGST (2.5%):</span>
+                  <span>{displayTaxRate > 0 ? `CGST (${(displayTaxRate / 2).toFixed(2)}%):` : "CGST (incl.):"}</span>
                   <span>₹{((receiptModal.taxMinor / 2) / 100).toFixed(2)}</span>
                 </div>
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "#64748b" }}>
-                  <span>SGST (2.5%):</span>
+                  <span>{displayTaxRate > 0 ? `SGST (${(displayTaxRate / 2).toFixed(2)}%):` : "SGST (incl.):"}</span>
                   <span>₹{((receiptModal.taxMinor / 2) / 100).toFixed(2)}</span>
                 </div>
                 <div className="receipt-divider">================================</div>

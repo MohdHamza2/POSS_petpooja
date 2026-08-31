@@ -193,7 +193,7 @@ export default function AdminDashboard() {
   const [tableOccupancy, setTableOccupancy] = useState<TableOccupancyApi | null>(null);
   const [recentInvoices, setRecentInvoices] = useState<RecentInvoiceApi[]>([]);
   const [selectedInvoice, setSelectedInvoice] = useState<RecentInvoiceApi | null>(null);
-  const [timeRange, setTimeRange] = useState<TimeRange>("Month");
+  const [timeRange, setTimeRange] = useState<TimeRange>("Day");
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -427,7 +427,7 @@ export default function AdminDashboard() {
         if (!res.ok) throw new Error("HTTP error " + res.status);
         return res.json() as Promise<TableOccupancyApi>;
       }),
-      authedFetch(`/reporting/invoices?limit=25&${qs}`, { signal: controller.signal }).then((res) => {
+      authedFetch(`/reporting/invoices?limit=100&${qs}`, { signal: controller.signal }).then((res) => {
         if (!res.ok) throw new Error("HTTP error " + res.status);
         return res.json() as Promise<RecentInvoiceApi[]>;
       }),

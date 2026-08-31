@@ -24,6 +24,9 @@ export async function onOrderConfirmed(orderId: string, prisma: PrismaClient): P
   );
 
   const newLines = order.orderItems.filter((item) => !item.isVoided && !ticketedIds.has(item.id));
+  // #region agent log
+  fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'B',location:'order-lifecycle.ts:onOrderConfirmed',message:'KOT ticket filter',data:{orderId,itemCount:order.orderItems.length,alreadyTicketed:ticketedIds.size,newLineCount:newLines.length,newLineIds:newLines.map((l)=>l.id)},timestamp:Date.now(),runId:'wave3'})}).catch(()=>{});
+  // #endregion
   if (newLines.length === 0) {
     return;
   }

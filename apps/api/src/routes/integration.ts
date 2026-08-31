@@ -5,6 +5,14 @@ import { encryptCredential, maskCredential } from "@kapmeta/integration";
 
 const router = Router();
 
+/** Same inclusive GST back-out as services/orders priceOrder. Menu prices are tax-in. */
+function extractInclusiveTaxMinor(subtotalMinor: bigint, taxRatePercent: number): bigint {
+  const rate = Number(taxRatePercent ?? 0);
+  if (subtotalMinor <= 0n || !Number.isFinite(rate) || rate <= 0) return 0n;
+  const taxRateBasisPoints = BigInt(Math.round(rate * 100));
+  return subtotalMinor - (subtotalMinor * 10000n) / (10000n + taxRateBasisPoints);
+}
+
 // =====================================
 // CHANNEL MAPPING MANAGEMENT
 // =====================================
@@ -152,7 +160,7 @@ router.get(["/channel-items", "/integration/channel-items"], requireAuth, requir
     });
 
     const menuItems = await prisma.menuItem.findMany({
-      where: { outletId, isActive: true },
+      where: { outletId },
       include: { category: true },
     });
 
@@ -162,24 +170,38 @@ router.get(["/channel-items", "/integration/channel-items"], requireAuth, requir
     const availByKey = new Map(
       availabilityRows.map((row) => [`${row.channel_id}_${row.item_id}`, row])
     );
+    const availByItem = new Map<string, (typeof availabilityRows)[number]>();
+    for (const row of availabilityRows) {
+      const prev = availByItem.get(row.item_id);
+      if (!prev || row.version >= prev.version) availByItem.set(row.item_id, row);
+    }
+
+    const channelsToShow =
+      channelAccounts.length > 0
+        ? channelAccounts
+        : [{ id: outletId, credentialsRef: "POS" } as (typeof channelAccounts)[number] & { credentialsRef: string }];
 
     const items = menuItems.map((item) => {
-      const channels = channelAccounts.map((acc) => {
+      const itemRow = availByItem.get(item.id);
+      const itemStocked = itemRow ? itemRow.state !== "OFF" : item.isActive !== false;
+      const channels = channelsToShow.map((acc) => {
         const row = availByKey.get(`${acc.id}_${item.id}`);
-        const isAvailable = row ? row.state !== "OFF" : true;
+        const isAvailable = row ? row.state !== "OFF" : itemStocked;
         return {
           mappingId: row?.id || `${acc.id}:${item.id}`,
           channelAccountId: acc.id,
-          channel: acc.credentialsRef || "CHANNEL",
+          channel: (acc as { credentialsRef?: string }).credentialsRef || "CHANNEL",
           menuItemId: item.id,
           isAvailable,
-          version: row?.version ?? 1,
+          version: row?.version ?? itemRow?.version ?? 1,
         };
       });
 
       const overallStatus =
         channels.length === 0
-          ? "ALL_OFF"
+          ? itemStocked
+            ? "ALL_ON"
+            : "ALL_OFF"
           : channels.every((c) => c.isAvailable)
           ? "ALL_ON"
           : channels.every((c) => !c.isAvailable)
@@ -196,6 +218,9 @@ router.get(["/channel-items", "/integration/channel-items"], requireAuth, requir
       };
     });
 
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'A',location:'integration.ts:GET channel-items',message:'channel 86 vs item_availability',data:{menuCount:menuItems.length,channelAccountCount:channelAccounts.length,offCount:items.filter((i)=>i.overallStatus==='ALL_OFF').length,onCount:items.filter((i)=>i.overallStatus==='ALL_ON').length,syntheticPos:channelAccounts.length===0},timestamp:Date.now(),runId:'86-post'})}).catch(()=>{});
+    // #endregion
     res.status(200).json(items);
   } catch (err: any) {
     console.error("Error fetching channel items:", err);
@@ -299,7 +324,11 @@ router.post(["/webhooks/:channel", "/webhooks/swiggy", "/webhooks/zomato"], asyn
     const outletId = targetOutlet.id;
 
     const storeStatus = await prisma.outlet_status.findUnique({ where: { outlet_id: outletId } });
-    if (storeStatus && storeStatus.is_online === false) {
+    const paused = storeStatus && storeStatus.is_online === false;
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'B',location:'integration.ts:webhook-pause',message:'aggregator ingest pause check',data:{outletId,hasStatusRow:Boolean(storeStatus),isOnline:storeStatus?storeStatus.is_online:null,blocked:Boolean(paused),externalOrderId},timestamp:Date.now(),runId:'pause-pre'})}).catch(()=>{});
+    // #endregion
+    if (paused) {
       res.status(409).json({ error: "Store is paused; aggregator orders are not accepted" });
       return;
     }
@@ -317,8 +346,9 @@ router.post(["/webhooks/:channel", "/webhooks/swiggy", "/webhooks/zomato"], asyn
       return {
         menuItemId: matched?.id || defaultItem?.id,
         quantity: Number(it.quantity || 1),
-        unitPriceMinor: Number(it.priceMinor || (matched ? Number(matched.price) * 100 : 25000)),
+        unitPriceMinor: Number(it.priceMinor || (matched ? Number(matched.price) * 100 : 0)),
         name: it.name || matched?.name || "Aggregator Item",
+        taxRatePercent: Number(matched?.taxRate ?? defaultItem?.taxRate ?? 0),
       };
     }).filter((l) => l.menuItemId);
 
@@ -328,12 +358,22 @@ router.post(["/webhooks/:channel", "/webhooks/swiggy", "/webhooks/zomato"], asyn
         quantity: 1,
         unitPriceMinor: Number(defaultItem.price) * 100,
         name: defaultItem.name,
+        taxRatePercent: Number(defaultItem.taxRate ?? 0),
       });
     }
 
-    const subtotal = lines.reduce((s, l) => s + BigInt(l.unitPriceMinor) * BigInt(l.quantity), 0n);
-    const tax = (subtotal * 5n) / 100n;
-    const grandTotal = subtotal + tax;
+    let subtotal = 0n;
+    let tax = 0n;
+    for (const l of lines) {
+      const lineSub = BigInt(l.unitPriceMinor) * BigInt(l.quantity);
+      subtotal += lineSub;
+      tax += extractInclusiveTaxMinor(lineSub, l.taxRatePercent);
+    }
+    const grandTotal = subtotal;
+    const additiveLie = subtotal + (subtotal * 5n) / 100n;
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'T1',location:'integration.ts:webhook-totals',message:'aggregator inclusive totals',data:{subtotal:String(subtotal),tax:String(tax),grandTotal:String(grandTotal),additiveWouldBe:String(additiveLie),lineCount:lines.length,rates:lines.map((l)=>l.taxRatePercent),mode:'inclusive'},timestamp:Date.now(),runId:'tax-fix'})}).catch(()=>{});
+    // #endregion
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
@@ -413,6 +453,8 @@ router.post(["/webhooks/:channel", "/webhooks/swiggy", "/webhooks/zomato"], asyn
       orderNumber: createdOrder.orderNumber,
       status: "CONFIRMED",
       externalOrderId,
+      grandTotalMinor: String(grandTotal),
+      taxTotalMinor: String(tax),
     });
   } catch (err: any) {
     console.error("Error processing aggregator webhook:", err);

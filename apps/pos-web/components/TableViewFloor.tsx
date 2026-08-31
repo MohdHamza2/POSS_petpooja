@@ -87,7 +87,6 @@ export default function TableViewFloor({
           };
         });
 
-
         setTables(mapped);
       }
     } catch (e) {
