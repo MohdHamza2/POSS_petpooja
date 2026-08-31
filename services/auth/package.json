@@ -8,11 +8,12 @@
     "test": "echo \"no tests yet\""
   },
   "dependencies": {
-    "@kapmeta/shared-types": "1.0.0",
     "@kapmeta/config": "1.0.0",
+    "@kapmeta/shared-types": "1.0.0",
     "@prisma/client": "^5.22.0",
     "bcryptjs": "^2.4.3",
-    "jsonwebtoken": "^9.0.2"
+    "jsonwebtoken": "^9.0.2",
+    "vitest": "^4.1.10"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",

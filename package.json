@@ -17,8 +17,10 @@
     "checkpoint:status": "ts-node scripts/checkpoint-manager.ts status",
     "checkpoint:update": "ts-node scripts/checkpoint-manager.ts update",
     "build": "npm run build --workspaces --if-present",
+    "postinstall": "prisma generate --schema=kapmeta/schema.prisma",
     "test": "npm test --workspaces --if-present",
     "test:unit": "vitest run",
+    "test:integration": "npm test -w @kapmeta/api",
     "typecheck": "node scripts/typecheck.js",
     "lint": "eslint apps packages services --max-warnings=-1",
     "contracts:validate": "redocly lint --config=redocly.yaml",
@@ -33,7 +35,9 @@
     "@prisma/client": "^5.22.0",
     "bcryptjs": "^2.4.3",
     "dotenv": "^17.4.2",
-    "pg": "^8.13.1"
+    "form-data": "4.0.6",
+    "pg": "^8.13.1",
+    "postcss": "8.5.26"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",
@@ -43,8 +47,10 @@
     "@types/pg": "^8.11.10",
     "@typescript-eslint/eslint-plugin": "^8.66.0",
     "@typescript-eslint/parser": "^8.66.0",
+    "@vitest/coverage-v8": "^4.1.10",
     "concurrently": "^8.2.2",
     "eslint": "^10.8.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "pg-mem": "^3.0.14",
     "prisma": "^5.22.0",
     "ts-node": "^10.9.2",
@@ -53,5 +59,18 @@
   },
   "prisma": {
     "schema": "kapmeta/schema.prisma"
+  },
+  "overrides": {
+    "next": "16.3.3",
+    "postcss": "8.5.26",
+    "form-data": "4.0.6",
+    "qs": "6.14.2",
+    "tough-cookie": "4.1.4",
+    "vitest": "$vitest",
+    "request": {
+      "form-data": "2.5.6",
+      "qs": "6.14.2",
+      "tough-cookie": "4.1.4"
+    }
   }
 }

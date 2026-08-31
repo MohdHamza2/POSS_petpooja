@@ -2,7 +2,7 @@
 
 Multi-outlet restaurant POS, kitchen (KOT), menu/catalog, online aggregator integration, inventory, finance, CRM and reporting platform.
 
-**Status:** Phase 0 — Discovery. No development starts until `docs/01-discovery/decision-register.md` items DEC-001..DEC-012 are signed off.
+**Status:** Runnable POS — table floor, waiter, billing, kitchen, inventory, and finance. Clone the repo, migrate, seed, and run `npm run dev`.
 
 ## 👉 Developers: read [`docs/START-HERE.md`](docs/START-HERE.md) before writing any code.
 
@@ -41,12 +41,19 @@ It is the single entry point — system overview, role-based reading order, what
 
 ## Getting Started
 
+PostgreSQL and Redis must be running locally. Default database name is `petpooja`.
+
 ```bash
 cp .env.example .env
 npm install
 npm run db:migrate
+npm run seed:dynamic
 npm run dev
 ```
+
+Then open the POS at http://localhost:4444 (API on http://localhost:4001).
+
+`npm install` generates the Prisma client. `npm run db:migrate` applies SQL history and syncs `kapmeta/schema.prisma` so a fresh clone matches the running POS (tables, merge groups, inventory, finance).
 
 ## Governance
 

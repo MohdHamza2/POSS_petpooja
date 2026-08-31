@@ -201,27 +201,6 @@ export async function deductBomStockForOrder(
     }).catch(() => undefined);
   }
 
-  // #region agent log
-  fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-    body: JSON.stringify({
-      sessionId: "9c675b",
-      runId: "post-merge",
-      hypothesisId: "X",
-      location: "inventory-depletion.ts:deductBomStockForOrder",
-      message: "BOM deduct result",
-      data: {
-        orderId,
-        itemCount: orderItems.length,
-        deductedCount,
-        skippedDuplicate,
-        detailCount: details.length,
-      },
-      timestamp: Date.now(),
-    }),
-  }).catch(() => {});
-  // #endregion
 
   return { deductedCount, skippedDuplicate, details };
 }

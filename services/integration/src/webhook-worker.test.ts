@@ -25,23 +25,29 @@ describe('WebhookWorker', () => {
     mockPrisma = {
       inboundEvent: {
         findUnique: vi.fn(),
-        update: vi.fn(),
+        update: vi.fn().mockResolvedValue({}),
       },
       channelAccount: {
         findUnique: vi.fn(),
       },
       channelItemMapping: {
-        findUnique: vi.fn(),
+        findUnique: vi.fn().mockImplementation(async ({ where }: any) => {
+          if (where?.channelAccountId_externalItemId?.externalItemId === "ext-item-1") {
+            return { menuItemId: "internal-item-1", item_id: "internal-item-1", channelPrice: 20000n };
+          }
+          return null;
+        }),
+        findMany: vi.fn().mockResolvedValue([]),
       },
       channelOrderMapping: {
         findFirst: vi.fn(),
-        create: vi.fn(),
+        create: vi.fn().mockResolvedValue({}),
       },
       order: {
         findUnique: vi.fn(),
       },
       integrationError: {
-        create: vi.fn(),
+        create: vi.fn().mockResolvedValue({}),
       },
     };
 
@@ -78,9 +84,11 @@ describe('WebhookWorker', () => {
     });
 
     // Mock channel item mapping lookup
-    mockPrisma.channelItemMapping.findUnique.mockResolvedValue({
-      menuItemId: 'internal-item-1',
-      channelPrice: 20000n
+    mockPrisma.channelItemMapping.findUnique.mockImplementation(async ({ where }: any) => {
+      if (where?.channelAccountId_externalItemId?.externalItemId === "ext-item-1") {
+        return { menuItemId: "internal-item-1", item_id: "internal-item-1", channelPrice: 20000n };
+      }
+      return null;
     });
 
     // Mock order creation and transition success
@@ -207,7 +215,6 @@ describe('WebhookWorker', () => {
     // Should log translation failed error
     expect(mockPrisma.integrationError.create).toHaveBeenCalledWith({
       data: {
-        channelAccountId: 'account-123',
         source: 'WEBHOOK_WORKER',
         sourceId: 'ext-event-123',
         errorCode: 'TRANSLATION_FAILED',

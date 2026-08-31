@@ -8,8 +8,9 @@
     "test": "echo \"no tests yet\""
   },
   "dependencies": {
-    "@kapmeta/shared-types": "1.0.0",
     "@kapmeta/config": "1.0.0",
-    "@prisma/client": "^5.22.0"
+    "@kapmeta/shared-types": "1.0.0",
+    "@prisma/client": "^5.22.0",
+    "vitest": "^4.1.10"
   }
 }

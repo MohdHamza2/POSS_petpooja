@@ -1,4 +1,5 @@
 import { PrismaClient } from "@prisma/client";
+import { writeAuditLog } from "@kapmeta/shared-types/audit-log";
 import { PrismaRbacChecker } from "./rbac";
 
 export interface SecurityViolation {
@@ -29,19 +30,17 @@ export class RbacSecurityGuard {
     });
 
     if (!userRole) {
-      // Record security incident in immutable audit log
-      await this.prisma.auditLog.create({
-        data: {
-          outletId: targetOutletId,
-          userId,
-          action: "SECURITY_VIOLATION_TENANT_BREACH",
-          entityType: "OUTLET",
-          entityId: targetOutletId,
-          reasonCode: "CROSS_OUTLET_UNAUTHORIZED_ACCESS_ATTEMPT",
-          afterState: {
-            reason: "CROSS_OUTLET_UNAUTHORIZED_ACCESS_ATTEMPT",
-            attemptedAt: new Date().toISOString(),
-          },
+      await writeAuditLog(this.prisma, {
+        outletId: targetOutletId,
+        userId,
+        action: "OVERRIDE",
+        entityType: "OUTLET",
+        entityId: targetOutletId,
+        reasonCode: "CROSS_OUTLET_UNAUTHORIZED_ACCESS_ATTEMPT",
+        afterState: {
+          originalAction: "SECURITY_VIOLATION_TENANT_BREACH",
+          reason: "CROSS_OUTLET_UNAUTHORIZED_ACCESS_ATTEMPT",
+          attemptedAt: new Date().toISOString(),
         },
       });
       return false;
@@ -61,19 +60,18 @@ export class RbacSecurityGuard {
 
     const check = await this.rbac.checkPermission({ userId, outletId, action });
     if (!check.allowed) {
-      await this.prisma.auditLog.create({
-        data: {
-          outletId,
-          userId,
-          action: "SECURITY_VIOLATION_UNAUTHORIZED_ACTION",
-          entityType: "PERMISSION",
-          entityId: action,
-          reasonCode: check.reason || "UNAUTHORIZED_ACTION",
-          afterState: {
-            attemptedAction: action,
-            reason: check.reason,
-            timestamp: new Date().toISOString(),
-          },
+      await writeAuditLog(this.prisma, {
+        outletId,
+        userId,
+        action: "OVERRIDE",
+        entityType: "USER",
+        entityId: userId,
+        reasonCode: check.reason || "UNAUTHORIZED_ACTION",
+        afterState: {
+          originalAction: "SECURITY_VIOLATION_UNAUTHORIZED_ACTION",
+          attemptedAction: action,
+          reason: check.reason,
+          timestamp: new Date().toISOString(),
         },
       });
       return { authorized: false, reason: check.reason };

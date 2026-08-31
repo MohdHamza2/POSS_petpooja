@@ -6,5 +6,8 @@
     "dev": "echo 'Starting admin-web'",
     "build": "echo 'Building admin-web'",
     "test": "echo 'Testing admin-web'"
+  },
+  "dependencies": {
+    "vitest": "^4.1.10"
   }
 }

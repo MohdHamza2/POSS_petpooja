@@ -584,28 +584,6 @@ export class PrismaOrderRepository implements OrderRepository {
         },
       });
 
-      // #region agent log
-      fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-        body: JSON.stringify({
-          sessionId: "9c675b",
-          runId: "waiter-charges",
-          hypothesisId: "J",
-          location: "prisma-order-repository.ts:setCharges",
-          message: "charges persisted on order",
-          data: {
-            orderId,
-            tipMinor: tipMinor.toString(),
-            serviceChargeMinor: serviceChargeMinor.toString(),
-            persistedTip: updated.tipTotal.toString(),
-            persistedService: updated.serviceChargeTotal.toString(),
-            grandTotal: updated.grandTotal.toString(),
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
 
       return { tipTotalMinor: updated.tipTotal, serviceChargeTotalMinor: updated.serviceChargeTotal, grandTotalMinor: updated.grandTotal };
     });

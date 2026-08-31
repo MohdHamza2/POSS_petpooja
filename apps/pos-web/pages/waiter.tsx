@@ -321,30 +321,6 @@ export default function WaiterDashboard() {
           };
         });
 
-        // #region agent log
-        fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-          body: JSON.stringify({
-            sessionId: "9c675b",
-            runId: "wave2-ws",
-            hypothesisId: "E",
-            location: "waiter.tsx:fetchTables",
-            message: "waiter occupancy from GET /tables live order",
-            data: {
-              occupied: mapped.filter((t) => t.status !== "VACANT").map((t) => t.tableNumber),
-              vacantCount: mapped.filter((t) => t.status === "VACANT").length,
-              mergeGroups: mapped
-                .filter((t) => t.mergeGroupId)
-                .map((t) => ({ n: t.tableNumber, mergedWith: t.mergedWith, orderId: t.currentOrderId })),
-              stages: mapped
-                .filter((t) => t.status !== "VACANT")
-                .map((t) => ({ n: t.tableNumber, stage: t.kitchenStage, orderStatus: t.orderStatus })),
-            },
-            timestamp: Date.now(),
-          }),
-        }).catch(() => {});
-        // #endregion
 
         setTables(mapped);
       }
@@ -400,27 +376,6 @@ export default function WaiterDashboard() {
       const data = await res.json();
       const rows: KOTTicket[] = Array.isArray(data) ? data : Array.isArray(data?.tickets) ? data.tickets : [];
       const live = rows.filter((k) => k.status === "QUEUED" || k.status === "PREPARING" || k.status === "READY");
-      // #region agent log
-      fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-        body: JSON.stringify({
-          sessionId: "9c675b",
-          runId: "wave2-ws",
-          hypothesisId: "F",
-          location: "waiter.tsx:fetchKots",
-          message: "waiter kitchen tickets",
-          data: {
-            gen,
-            applied: gen === kotFetchGen.current,
-            rawCount: rows.length,
-            liveCount: live.length,
-            statuses: rows.map((k) => k.status),
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
       if (gen !== kotFetchGen.current) return;
       setMyKots(live);
     } catch (e) {
@@ -680,21 +635,6 @@ export default function WaiterDashboard() {
       if (res.ok) {
         const created = await res.json();
         const orderId = created.id || existingOrderId;
-        // #region agent log
-        fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-          body: JSON.stringify({
-            sessionId: "9c675b",
-            runId: "waiter-kot",
-            hypothesisId: "G",
-            location: "waiter.tsx:submitOrder",
-            message: "waiter order posted with action KOT",
-            data: { table: activeTable.tableNumber, orderId, status: created.status, lineCount: lines.length, attached: !!existingOrderId },
-            timestamp: Date.now(),
-          }),
-        }).catch(() => {});
-        // #endregion
         setCart((prev) => prev.filter((ci) => !firing.includes(ci)));
         if (courseFilter && !manageOrder && orderId) {
           const detailRes = await authedFetch(`/orders/${orderId}`);
@@ -707,21 +647,6 @@ export default function WaiterDashboard() {
         showPickupNotification(`KOT sent for Table ${activeTable.tableNumber}.`);
       } else {
         const errData = await res.json().catch(() => ({}));
-        // #region agent log
-        fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-          body: JSON.stringify({
-            sessionId: "9c675b",
-            runId: "waiter-kot",
-            hypothesisId: "G",
-            location: "waiter.tsx:submitOrder:fail",
-            message: "waiter order POST failed",
-            data: { table: activeTable.tableNumber, httpStatus: res.status, error: errData.error },
-            timestamp: Date.now(),
-          }),
-        }).catch(() => {});
-        // #endregion
         setOrderError(errData.error || "Failed to place order");
       }
     } catch (e) {
@@ -795,26 +720,6 @@ export default function WaiterDashboard() {
       if (detailRes.ok) {
         const detail = await detailRes.json();
         setManageOrder(detail);
-        // #region agent log
-        fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-          body: JSON.stringify({
-            sessionId: "9c675b",
-            runId: "waiter-lifecycle",
-            hypothesisId: "H",
-            location: "waiter.tsx:openManageTable",
-            message: "manage order kitchenStatus",
-            data: {
-              table: table.tableNumber,
-              orderId: detail.id,
-              orderStatus: detail.status,
-              kitchenStatuses: (detail.items || []).map((i: any) => i.kitchenStatus),
-            },
-            timestamp: Date.now(),
-          }),
-        }).catch(() => {});
-        // #endregion
       }
     } catch (e) {
       console.error("Failed to load table order", e);
@@ -933,21 +838,6 @@ export default function WaiterDashboard() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sourceTableIds: mergeSourceIds, targetTableId }),
       });
-      // #region agent log
-      fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-        body: JSON.stringify({
-          sessionId: "9c675b",
-          runId: "merge-fix",
-          hypothesisId: "Q",
-          location: "waiter.tsx:completeMerge",
-          message: "waiter merge POST /tables/merge",
-          data: { ok: res.ok, status: res.status, sourceTableIds: mergeSourceIds, targetTableId },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
       if (res.ok) {
         setMergeSourceIds([]);
         setMergeMode(false);
@@ -1012,21 +902,6 @@ export default function WaiterDashboard() {
     try {
       const tipMinor = Math.round((parseFloat(tipInput) || 0) * 100);
       const serviceChargeMinor = Math.round((parseFloat(serviceChargeInput) || 0) * 100);
-      // #region agent log
-      fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-        body: JSON.stringify({
-          sessionId: "9c675b",
-          runId: "waiter-charges",
-          hypothesisId: "K",
-          location: "waiter.tsx:applyCharges",
-          message: "waiter applying tip/service before bill",
-          data: { orderId: bill.orderId, tipMinor, serviceChargeMinor },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
       const res = await authedFetch(`/orders/${bill.orderId}/charges`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -1096,53 +971,11 @@ export default function WaiterDashboard() {
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ paymentMethod }),
             });
-            // #region agent log
-            fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-              method: "POST",
-              headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-              body: JSON.stringify({
-                sessionId: "9c675b",
-                runId: "post-merge",
-                hypothesisId: "W",
-                location: "waiter.tsx:submitPayment",
-                message: "waiter pay then settle",
-                data: {
-                  orderId: bill.orderId,
-                  tableId: billTable.id,
-                  tableNumber: billTable.tableNumber,
-                  mergeGroupId: billTable.mergeGroupId || null,
-                  settleOk: settleRes.ok,
-                  settleStatus: settleRes.status,
-                },
-                timestamp: Date.now(),
-              }),
-            }).catch(() => {});
-            // #endregion
             if (!settleRes.ok) {
               const errData = await settleRes.json().catch(() => ({}));
               showPickupNotification(errData.error || "Paid, but settle failed");
             }
             const vacantRes = await authedFetch(`/tables/${billTable.id}/vacant`, { method: "POST" }).catch(() => null);
-            // #region agent log
-            fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-              method: "POST",
-              headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-              body: JSON.stringify({
-                sessionId: "9c675b",
-                runId: "post-fix",
-                hypothesisId: "W",
-                location: "waiter.tsx:submitPayment:vacant",
-                message: "waiter vacant after settle",
-                data: {
-                  orderId: bill.orderId,
-                  tableId: billTable.id,
-                  vacantOk: vacantRes ? vacantRes.ok : false,
-                  vacantStatus: vacantRes ? vacantRes.status : null,
-                },
-                timestamp: Date.now(),
-              }),
-            }).catch(() => {});
-            // #endregion
             setBillTable(null);
             fetchTables();
             fetchMyStats();

@@ -13,6 +13,10 @@ function makeFakePrisma() {
   };
 
   const tx = {
+    ingredients: {
+      findUnique: async () => ({ current_stock_qty: 100, currentStock: { toNumber: () => 100 } }),
+      update: async () => ({ current_stock_qty: 60, currentStock: { toNumber: () => 60 } }),
+    },
     ingredient: {
       findUnique: async () => ({ currentStock: { toNumber: () => 100 } }),
       update: async () => ({ currentStock: { toNumber: () => 60 } }),

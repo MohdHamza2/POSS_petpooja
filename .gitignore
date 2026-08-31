@@ -25,6 +25,12 @@ Thumbs.db
 .idea/
 .vscode/*
 !.vscode/extensions.json
+.cursor/
+.claude/
+**/.claude-flow/
+.claude-flow/
+scratch/
+debug-*.png
 
 tmp/
 .cache/

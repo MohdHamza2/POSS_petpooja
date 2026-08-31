@@ -4,9 +4,10 @@
   "main": "src/index.ts",
   "types": "src/index.ts",
   "dependencies": {
-    "@kapmeta/shared-types": "*",
     "@kapmeta/orders": "*",
+    "@kapmeta/shared-types": "*",
     "@prisma/client": "^5.22.0",
-    "crypto": "^1.0.1"
+    "crypto": "^1.0.1",
+    "vitest": "^4.1.10"
   }
 }

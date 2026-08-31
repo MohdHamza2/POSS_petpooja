@@ -1,4 +1,14 @@
-export type AuditEntityType = "ORDER" | "PAYMENT" | "MENU_ITEM" | "STOCK" | "KOT" | "PURCHASE_ORDER" | "REFUND" | "USER";
+export type AuditEntityType =
+  | "ORDER"
+  | "PAYMENT"
+  | "MENU_ITEM"
+  | "STOCK"
+  | "KOT"
+  | "PURCHASE_ORDER"
+  | "REFUND"
+  | "USER"
+  | "DINING_TABLE"
+  | "OUTLET";
 
 export interface AuditLogInput {
   outletId: string;

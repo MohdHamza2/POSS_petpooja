@@ -156,8 +156,10 @@ export async function computeSegment(
 
   if (triggerType === "INACTIVE_CUSTOMER") {
     const days = segmentFilter?.inactiveDays;
-    const inactiveDays = typeof days === "number" && days > 0 ? days : 30;
-    const customerIds = await repo.findInactiveCustomerIds(outletId, inactiveDays);
+    if (typeof days !== "number" || days <= 0) {
+      throw new Error("segmentFilter.inactiveDays (positive number) is required for INACTIVE_CUSTOMER campaigns");
+    }
+    const customerIds = await repo.findInactiveCustomerIds(outletId, days);
     return { customerIds };
   }
 

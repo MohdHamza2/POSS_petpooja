@@ -2,5 +2,8 @@
   "name": "@kapmeta/ui-kit",
   "version": "1.0.0",
   "main": "index.js",
-  "private": true
+  "private": true,
+  "dependencies": {
+    "vitest": "^4.1.10"
+  }
 }

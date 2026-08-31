@@ -12,6 +12,7 @@
     "@kapmeta/shared-types": "1.0.0",
     "@prisma/client": "^5.22.0",
     "escpos": "^3.0.0-alpha.6",
-    "escpos-network": "^3.0.0-alpha.5"
+    "escpos-network": "^3.0.0-alpha.5",
+    "vitest": "^4.1.10"
   }
 }

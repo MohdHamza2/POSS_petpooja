@@ -8,7 +8,8 @@
     "test": "echo \"no tests yet\""
   },
   "dependencies": {
+    "@kapmeta/config": "1.0.0",
     "@kapmeta/shared-types": "1.0.0",
-    "@kapmeta/config": "1.0.0"
+    "vitest": "^4.1.10"
   }
 }

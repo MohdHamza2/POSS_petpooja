@@ -115,28 +115,6 @@ router.get("/waiters/me/stats", requireAuth, async (req: AuthedRequest, res) => 
     const serviceChargeMinor = orders.reduce((sum, o) => sum + (o.serviceChargeTotal || 0n), 0n);
     const revenueMinor = orders.reduce((sum, o) => sum + BigInt(o.grandTotal || 0), 0n);
 
-    // #region agent log
-    fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-      body: JSON.stringify({
-        sessionId: "9c675b",
-        runId: "waiter-charges",
-        hypothesisId: "L",
-        location: "waiters.ts:GET /waiters/me/stats",
-        message: "waiter stats aggregate",
-        data: {
-          orderCount: orders.length,
-          completedOrders: completedOrders.length,
-          tablesServed,
-          tipsMinor: tipsMinor.toString(),
-          serviceChargeMinor: serviceChargeMinor.toString(),
-          revenueMinor: revenueMinor.toString(),
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
 
     res.status(200).json({
       ordersToday: orders.length,
@@ -259,21 +237,6 @@ router.post("/waiters/me/shift-handover", requireAuth, async (req: AuthedRequest
       managerNotes: String(req.body.managerNotes || "").slice(0, 2000),
       waiterName,
     };
-    // #region agent log
-    fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-      body: JSON.stringify({
-        sessionId: "9c675b",
-        runId: "waiter-lifecycle",
-        hypothesisId: "I",
-        location: "waiters.ts:POST /waiters/me/shift-handover",
-        message: "captain handover persisted without closing drawer",
-        data: { waiterId: req.auth!.userId, ...payload },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
     const row = await prisma.waiterShiftHandover.create({
       data: {
         outletId: req.auth!.outletId,

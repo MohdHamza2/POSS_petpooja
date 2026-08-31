@@ -87,38 +87,6 @@ export default function TableViewFloor({
           };
         });
 
-        // #region agent log
-        fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-          body: JSON.stringify({
-            sessionId: "9c675b",
-            runId: "wave1-kot",
-            hypothesisId: "C",
-            location: "TableViewFloor.tsx:fetchTablesData",
-            message: "floor paint from GET /tables only",
-            data: {
-              queued: mapped
-                .filter((t) => t.kitchenStage === "QUEUED")
-                .map((t) => t.tableNumber),
-              occupied: mapped
-                .filter((t) => t.status !== "VACANT")
-                .map((t) => ({
-                  n: t.tableNumber,
-                  status: t.status,
-                  kitchenStage: t.kitchenStage,
-                  kots: (t.currentOrder?.kots || []).map((k: any) => k.status),
-                })),
-              serveCount: mapped.filter((t) => t.kitchenStage === "READY").length,
-              vacantCount: mapped.filter((t) => t.status === "VACANT").length,
-              mergeGroups: mapped
-                .filter((t) => t.mergeGroupId)
-                .map((t) => ({ n: t.tableNumber, mergedWith: t.mergedWith, orderId: t.activeOrderId })),
-            },
-            timestamp: Date.now(),
-          }),
-        }).catch(() => {});
-        // #endregion
 
         setTables(mapped);
       }
@@ -202,27 +170,6 @@ export default function TableViewFloor({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sourceTableIds: mergeSourceIds, targetTableId: targetTable.id }),
       });
-      // #region agent log
-      fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-        body: JSON.stringify({
-          sessionId: "9c675b",
-          runId: "merge-fix",
-          hypothesisId: "Q",
-          location: "TableViewFloor.tsx:completeMerge",
-          message: "POS merge POST /tables/merge",
-          data: {
-            ok: res.ok,
-            status: res.status,
-            sourceTableIds: mergeSourceIds,
-            targetTableId: targetTable.id,
-            targetNumber: targetTable.tableNumber,
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
       if (res.ok) {
         setMergeSourceIds([]);
         setMergeMode(false);

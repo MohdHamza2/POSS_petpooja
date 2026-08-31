@@ -120,29 +120,6 @@ ordersRouter.post("/orders", requireAuth, async (req: AuthedRequest, res) => {
         await stampOrderMergeLabel(prisma, outletId, existingLive.id, diningTableId);
         const orderDetail = await getOrderDetail(outletId, existingLive.id, orderRepo);
         const attachMembers = await expandMergeMemberIds(prisma, outletId, [diningTableId]);
-        // #region agent log
-        fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-          body: JSON.stringify({
-            sessionId: "9c675b",
-            runId: "post-merge",
-            hypothesisId: "T",
-            location: "orders.ts:POST /orders:attach",
-            message: "attach to existing live order",
-            data: {
-              requestedTableId: body.diningTableId || null,
-              anchorTableId: diningTableId,
-              orderId: existingLive.id,
-              attachedToExisting: true,
-              memberCount: attachMembers.length,
-              memberIds: attachMembers,
-              broadcastTables: [diningTableId],
-            },
-            timestamp: Date.now(),
-          }),
-        }).catch(() => {});
-        // #endregion
         import("../websockets").then(({ broadcast }) => {
           broadcast("order.updated", { orderId: existingLive.id, diningTableId });
           broadcast("kot.created", { orderId: existingLive.id, diningTableId });
@@ -223,29 +200,6 @@ ordersRouter.post("/orders", requireAuth, async (req: AuthedRequest, res) => {
     const createMembers = diningTableId
       ? await expandMergeMemberIds(prisma, outletId, [diningTableId])
       : [];
-    // #region agent log
-    fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-      body: JSON.stringify({
-        sessionId: "9c675b",
-        runId: "post-merge",
-        hypothesisId: "T",
-        location: "orders.ts:POST /orders:create",
-        message: "created new order (did not attach)",
-        data: {
-          requestedTableId: body.diningTableId || null,
-          pinTableId: diningTableId || null,
-          orderId: result.id,
-          attachedToExisting: false,
-          memberCount: createMembers.length,
-          memberIds: createMembers,
-          action: body.action || null,
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
 
     import("../websockets").then(({ broadcast }) => {
       broadcast("order.created", {
@@ -371,26 +325,6 @@ ordersRouter.get("/orders/:id", requireAuth, async (req: AuthedRequest, res) => 
       }
     }
 
-    // #region agent log
-    fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-      body: JSON.stringify({
-        sessionId: "9c675b",
-        runId: "waiter-lifecycle",
-        hypothesisId: "H",
-        location: "orders.ts:GET /orders/:id",
-        message: "order kitchenStatus joined from KOT tickets",
-        data: {
-          orderId: order.id,
-          orderStatus: order.status,
-          itemCount: (order.items || []).length,
-          kitchenStatuses: Array.from(kitchenByOrderItem.values()),
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
 
     res.status(200).json({
       ...order,
@@ -570,29 +504,6 @@ ordersRouter.post("/orders/:id/items", requireAuth, async (req: AuthedRequest, r
     const itemMembers = live?.diningTableId
       ? await expandMergeMemberIds(prisma, outletId, [live.diningTableId])
       : [];
-    // #region agent log
-    fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-      body: JSON.stringify({
-        sessionId: "9c675b",
-        runId: "post-merge",
-        hypothesisId: "U",
-        location: "orders.ts:POST /orders/:id/items",
-        message: "add items to running order",
-        data: {
-          orderId: req.params.id,
-          diningTableId: live?.diningTableId || null,
-          tableNumber: live?.table_number || null,
-          memberCount: itemMembers.length,
-          memberIds: itemMembers,
-          lineCount: lines.length,
-          broadcastTopics: [],
-        },
-        timestamp: Date.now(),
-      }),
-      }).catch(() => {});
-    // #endregion
     import("../websockets").then(({ broadcast }) => {
       broadcast("order.updated", { orderId: req.params.id, diningTableId: live?.diningTableId || null });
       broadcast("kot.created", { orderId: req.params.id, diningTableId: live?.diningTableId || null });
@@ -600,27 +511,6 @@ ordersRouter.post("/orders/:id/items", requireAuth, async (req: AuthedRequest, r
         broadcast("table.status_updated", { tableId: id, orderId: req.params.id, status: "OCCUPIED" });
       }
     }).catch(() => {});
-    // #region agent log
-    fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-      body: JSON.stringify({
-        sessionId: "9c675b",
-        runId: "post-fix",
-        hypothesisId: "U",
-        location: "orders.ts:POST /orders/:id/items:fanout",
-        message: "add-items fanout after KOT",
-        data: {
-          orderId: req.params.id,
-          diningTableId: live?.diningTableId || null,
-          memberCount: itemMembers.length,
-          memberIds: itemMembers,
-          broadcastTopics: ["order.updated", "kot.created", "table.status_updated"],
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
     res.status(200).json(added);
   } catch (err: any) {
     console.error("Error adding items to order:", err);
@@ -667,27 +557,6 @@ const handleCharges = async (req: AuthedRequest, res: any) => {
       BigInt(tipMinor || 0),
       BigInt(serviceChargeMinor || 0)
     );
-    // #region agent log
-    fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-      body: JSON.stringify({
-        sessionId: "9c675b",
-        runId: "waiter-charges",
-        hypothesisId: "K",
-        location: "orders.ts:handleCharges",
-        message: "charges API applied",
-        data: {
-          orderId: req.params.id,
-          tipMinor: String(tipMinor || 0),
-          serviceChargeMinor: String(serviceChargeMinor || 0),
-          persistedTip: updated.tipTotalMinor.toString(),
-          persistedService: updated.serviceChargeTotalMinor.toString(),
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
     res.status(200).json({
       ...updated,
       tipTotalMinor: updated.tipTotalMinor.toString(),

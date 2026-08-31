@@ -15,5 +15,8 @@
     "./orders": "./orders.ts",
     "./purchase": "./purchase.ts",
     "./reporting": "./reporting.ts"
+  },
+  "dependencies": {
+    "vitest": "^4.1.10"
   }
 }

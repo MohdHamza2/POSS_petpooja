@@ -52,28 +52,6 @@ export async function onOrderConfirmed(orderId: string, prisma: PrismaClient): P
           select: { tableNumber: true, mergeGroupId: true, mergePrimaryTableId: true },
         })
       : null;
-    // #region agent log
-    fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-      body: JSON.stringify({
-        sessionId: "9c675b",
-        runId: "post-merge",
-        hypothesisId: "V",
-        location: "order-lifecycle.ts:onOrderConfirmed",
-        message: "KOT created from order lines",
-        data: {
-          orderId,
-          diningTableId: order.diningTableId,
-          tableNumber: table?.tableNumber || null,
-          mergeGroupId: table?.mergeGroupId || null,
-          newLineCount: newLines.length,
-          broadcastKotCreated: false,
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
     import("../websockets").then(({ broadcast }) => {
       broadcast("kot.created", {
         orderId: order.id,
@@ -85,28 +63,6 @@ export async function onOrderConfirmed(orderId: string, prisma: PrismaClient): P
         broadcast("table.status_updated", { tableId: order.diningTableId, orderId: order.id, status: "OCCUPIED" });
       }
     }).catch(() => {});
-    // #region agent log
-    fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-      body: JSON.stringify({
-        sessionId: "9c675b",
-        runId: "post-fix",
-        hypothesisId: "V",
-        location: "order-lifecycle.ts:onOrderConfirmed:fanout",
-        message: "KOT created fanout",
-        data: {
-          orderId,
-          diningTableId: order.diningTableId,
-          tableNumber: table?.tableNumber || null,
-          mergeGroupId: table?.mergeGroupId || null,
-          newLineCount: newLines.length,
-          broadcastKotCreated: true,
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
   } catch (err) {
     console.error(`onOrderConfirmed: KOT creation failed for order ${orderId}`, err);
   }

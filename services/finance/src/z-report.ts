@@ -78,27 +78,6 @@ export class ZReportGenerator {
       handoverDigitalTips += h.digitalTipsMinor;
     }
 
-    // #region agent log
-    fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-      body: JSON.stringify({
-        sessionId: "9c675b",
-        runId: "waiter-charges",
-        hypothesisId: "N",
-        location: "z-report.ts:generateDailyReport",
-        message: "z-report totals include tips/service/handover",
-        data: {
-          invoiceCount: orders.length,
-          totalTips: totalTips.toString(),
-          totalServiceCharge: totalServiceCharge.toString(),
-          handoverCount: handovers.length,
-          handoverTipPayout: handoverTipPayout.toString(),
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
 
     return {
       outletId,

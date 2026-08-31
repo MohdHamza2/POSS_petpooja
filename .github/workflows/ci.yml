@@ -37,6 +37,8 @@ jobs:
     env:
       DATABASE_URL: postgresql://pos:pos@localhost:5432/pos_test
       REDIS_URL: redis://localhost:6379
+      JWT_SECRET: ci_jwt_secret_key_minimum_32_characters_long
+      CREDENTIALS_ENCRYPTION_KEY: ci_only_channel_credentials_key_change_me
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -73,3 +75,5 @@ jobs:
       - run: npm audit --audit-level=high
       - name: Secret scan
         uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

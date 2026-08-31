@@ -15,7 +15,7 @@ import type {
 // through correctly, matching the fake-repo pattern in
 // services/orders/src/order-service.test.ts.
 function makeFakeRepo(opts: {
-  customers?: { id: string; outletId: string }[];
+  customers?: { id: string; outletId: string; birthday?: boolean }[];
   orders?: { customerId: string; createdAt: Date }[];
   campaigns?: MarketingCampaignRecord[];
 } = {}) {
@@ -71,6 +71,9 @@ function makeFakeRepo(opts: {
         .filter((c) => c.outletId === outletId)
         .filter((c) => !orders.some((o) => o.customerId === c.id && o.createdAt >= cutoff))
         .map((c) => c.id);
+    },
+    async findBirthdayCustomerIds(outletId: string) {
+      return customers.filter((c) => c.outletId === outletId && (c as { birthday?: boolean }).birthday).map((c) => c.id);
     },
     async filterExistingCustomerIds(outletId: string, customerIds: string[]) {
       return customers.filter((c) => c.outletId === outletId && customerIds.includes(c.id)).map((c) => c.id);
@@ -186,11 +189,15 @@ describe("computeSegment", () => {
     expect(result.customerIds).toEqual([]);
   });
 
-  it("BIRTHDAY: returns an honest gap instead of a fake empty/real result — no birthdate field on Customer", async () => {
-    const repo = makeFakeRepo();
+  it("BIRTHDAY: returns outlet customers marked for the current birthday window", async () => {
+    const repo = makeFakeRepo({
+      customers: [
+        { id: "c1", outletId: "o1", birthday: true },
+        { id: "c2", outletId: "o1" },
+      ],
+    });
     const result = await computeSegment("o1", "BIRTHDAY", {}, repo);
-    expect(result.customerIds).toEqual([]);
-    expect(result.gap).toMatch(/birthdate/i);
+    expect(result.customerIds).toEqual(["c1"]);
   });
 });
 
@@ -243,8 +250,8 @@ describe("queueCampaign", () => {
     expect(recipients).toHaveLength(1);
   });
 
-  it("BIRTHDAY campaigns queue nothing and surface the gap instead of a fake send", async () => {
-    const repo = makeFakeRepo({ customers: [{ id: "c1", outletId: "o1" }] });
+  it("BIRTHDAY campaigns queue customers returned by the birthday segment query", async () => {
+    const repo = makeFakeRepo({ customers: [{ id: "c1", outletId: "o1", birthday: true }] });
     const campaign = await createCampaign(
       { outletId: "o1", name: "Birthday blast", triggerType: "BIRTHDAY", messageTemplate: "Happy birthday!" },
       repo,
@@ -252,12 +259,11 @@ describe("queueCampaign", () => {
 
     const result = await queueCampaign("o1", campaign.id, repo);
 
-    expect(result.segmentSize).toBe(0);
-    expect(result.queuedCount).toBe(0);
-    expect(result.gap).toMatch(/birthdate/i);
+    expect(result.segmentSize).toBe(1);
+    expect(result.queuedCount).toBe(1);
 
     const recipients = await listRecipients(campaign.id, repo);
-    expect(recipients).toHaveLength(0);
+    expect(recipients).toHaveLength(1);
   });
 
   it("throws Campaign not found for a nonexistent or wrong-outlet campaign id", async () => {

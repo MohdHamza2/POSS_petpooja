@@ -6,7 +6,8 @@
   "main": "src/interfaces.ts",
   "types": "src/interfaces.ts",
   "dependencies": {
-    "pg": "^8.11.0"
+    "pg": "^8.11.0",
+    "vitest": "^4.1.10"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

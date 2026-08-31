@@ -113,21 +113,6 @@ tablesRouter.get("/tables", requireAuth, async (req: AuthedRequest, res) => {
     const outletId = req.auth!.outletId;
     const dissolvedOrphans = await dissolvePaidEmptyMergeGroups(prisma, outletId);
     if (dissolvedOrphans.length > 0) {
-      // #region agent log
-      fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-        body: JSON.stringify({
-          sessionId: "9c675b",
-          runId: "post-fix",
-          hypothesisId: "T",
-          location: "tables.ts:GET /tables:orphanDissolve",
-          message: "dissolved paid leftover merge groups",
-          data: { dissolvedOrphans },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
     }
     const tables = await (prisma.diningTable as any).findMany({
       where: { outletId, isActive: true },
@@ -248,54 +233,6 @@ tablesRouter.get("/tables", requireAuth, async (req: AuthedRequest, res) => {
       };
     });
 
-    // #region agent log
-    fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-      body: JSON.stringify({
-        sessionId: "9c675b",
-        runId: "wave1-kot",
-        hypothesisId: "C",
-        location: "tables.ts:GET /tables",
-        message: "occupancy projection",
-        data: {
-          healedVacant: occupiedNoOrder.map((t: any) => t.tableNumber),
-          healedOccupied: vacantWithOrder.map((t: any) => t.tableNumber),
-          healerForcedVacantNoOrder: occupiedNoOrder.map((t: any) => ({
-            n: t.tableNumber,
-            storedStatus: t.status,
-          })),
-          hypothesisP: occupiedNoOrder.length > 0,
-          mergeGroups: mapped
-            .filter((t: any) => t.mergeGroupId)
-            .map((t: any) => ({
-              n: t.tableNumber,
-              status: t.status,
-              mergeGroupId: t.mergeGroupId,
-              primary: t.isMergePrimary,
-              mergedWith: t.mergedWith,
-              orderId: t.activeOrderId,
-            })),
-          queuedCount: mapped.filter((t: any) => t.kitchenStage === "QUEUED").length,
-          queuedGhost: mapped
-            .filter((t: any) => t.kitchenStage === "QUEUED" && !(t.currentOrder?.kots || []).some((k: any) => QUEUED_KOT_STATUSES.has(k.status)))
-            .map((t: any) => t.tableNumber),
-          occupied: mapped
-            .filter((t: any) => t.status !== "VACANT")
-            .map((t: any) => ({
-              n: t.tableNumber,
-              status: t.status,
-              kitchenStage: t.kitchenStage,
-              orderStatus: t.currentOrder?.status || null,
-              kots: (t.currentOrder?.kots || []).map((k: any) => k.status),
-            })),
-          vacantCount: mapped.filter((t: any) => t.status === "VACANT").length,
-          readyCount: mapped.filter((t: any) => t.kitchenStage === "READY").length,
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
 
     res.status(200).json(mapped);
   } catch (err) {
@@ -986,28 +923,6 @@ const handleTableTransfer = async (req: AuthedRequest, res: any) => {
       });
     }
 
-    // #region agent log
-    fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-      body: JSON.stringify({
-        sessionId: "9c675b",
-        runId: "waiter-charges",
-        hypothesisId: "M",
-        location: "tables.ts:handleTableTransfer",
-        message: "table/KOT transfer applied",
-        data: {
-          transferMode,
-          kotTicketId: kotTicketId || null,
-          fromTable: sourceTable.tableNumber,
-          toTable: targetTable.tableNumber,
-          transferredOrderId,
-          sourceVacated,
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
 
     import("../websockets").then(({ broadcast }) => {
       broadcast("table.transferred", {
@@ -1078,66 +993,12 @@ const handleTableMerge = async (req: AuthedRequest, res: any) => {
     let survivorOrderId: string | null = null;
 
     if (liveOrders.length === 0) {
-      // #region agent log
-      fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-        body: JSON.stringify({
-          sessionId: "9c675b",
-          runId: "post-fix",
-          hypothesisId: "R",
-          location: "tables.ts:handleTableMerge",
-          message: "pre-order merge (no live orders)",
-          data: {
-            sourceTableIds,
-            targetTableId,
-            targetNumber: targetTable.tableNumber,
-            targetStatus: targetTable.status,
-            memberIds,
-            capacityUnchanged: true,
-            sourcesVacated: false,
-            sourceStatuses: memberTables.map((t: any) => ({ id: t.id, n: t.tableNumber, status: t.status })),
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
     } else {
       const survivor =
         liveOrders.find((o: any) => o.diningTableId === targetTableId) || liveOrders[0];
       survivorOrderId = survivor.id;
       const others = liveOrders.filter((o: any) => o.id !== survivor.id);
       const mergePath = survivor.diningTableId === targetTableId ? "group-keep-primary-order" : "group-promote-live-order";
-      // #region agent log
-      fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-        body: JSON.stringify({
-          sessionId: "9c675b",
-          runId: "post-fix",
-          hypothesisId: "O",
-          location: "tables.ts:handleTableMerge",
-          message: "active-order merge path",
-          data: {
-            mergePath,
-            sourceTableIds,
-            targetTableId,
-            targetNumber: targetTable.tableNumber,
-            targetStatus: targetTable.status,
-            targetHadLiveOrder: liveOrders.some((o: any) => o.diningTableId === targetTableId),
-            sourcesVacated: false,
-            survivorOrderId,
-            liveOrderTables: liveOrders.map((o: any) => ({
-              orderId: o.id,
-              diningTableId: o.diningTableId,
-              tableNumber: o.table_number,
-              itemCount: o.orderItems?.length || 0,
-            })),
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
 
       await prisma.$transaction(async (tx) => {
         await foldOrdersInto(tx, survivor, others, {
@@ -1162,32 +1023,6 @@ const handleTableMerge = async (req: AuthedRequest, res: any) => {
       where: { outletId, id: { in: memberIds } },
       select: { id: true, tableNumber: true, status: true, mergeGroupId: true, mergePrimaryTableId: true, capacity: true },
     });
-    // #region agent log
-    fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-      body: JSON.stringify({
-        sessionId: "9c675b",
-        runId: "post-fix",
-        hypothesisId: "O",
-        location: "tables.ts:handleTableMerge:after",
-        message: "merge group applied",
-        data: {
-          mergeGroupId: applied.mergeGroupId,
-          primaryTableId: targetTableId,
-          survivorOrderId,
-          sourcesVacated: afterMembers.some((t: any) => t.status === "VACANT"),
-          members: afterMembers.map((t: any) => ({
-            n: t.tableNumber,
-            status: t.status,
-            primary: t.mergePrimaryTableId,
-            capacity: t.capacity,
-          })),
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
 
     import("../websockets").then(({ broadcast }) => {
       broadcast("table.merged", {

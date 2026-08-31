@@ -5,18 +5,24 @@ describe("RBAC Security & Negative Authorization Suite", () => {
   it("strictly denies Cashier from executing manager order.void", async () => {
     const mockPrisma = {
       userRole: {
-        findFirst: async () => ({ userId: "u-cashier", outletId: "outlet-1" }),
+        findFirst: async () => ({ userId: "u-cashier", outletId: "outlet-1", roleId: "role-cashier" }),
+        findMany: async () => [{ userId: "u-cashier", outletId: "outlet-1", roleId: "role-cashier" }],
+      },
+      role: {
+        findMany: async () => [{ id: "role-cashier", name: "CASHIER", code: "CASHIER" }],
+      },
+      rolePermission: {
         findMany: async () => [
-          {
-            role: {
-              name: "CASHIER",
-              rolePermissions: [
-                { permission: { action: "order.create" } },
-                { permission: { action: "order.read" } },
-                { permission: { action: "payment.capture" } },
-              ],
-            },
-          },
+          { roleId: "role-cashier", permissionId: "perm-order.create" },
+          { roleId: "role-cashier", permissionId: "perm-order.read" },
+          { roleId: "role-cashier", permissionId: "perm-payment.capture" },
+        ],
+      },
+      permission: {
+        findMany: async () => [
+          { id: "perm-order.create", action: "order.create", code: "order.create" },
+          { id: "perm-order.read", action: "order.read", code: "order.read" },
+          { id: "perm-payment.capture", action: "payment.capture", code: "payment.capture" },
         ],
       },
       auditLog: {
@@ -35,17 +41,22 @@ describe("RBAC Security & Negative Authorization Suite", () => {
   it("strictly denies Kitchen user from executing payment.capture", async () => {
     const mockPrisma = {
       userRole: {
-        findFirst: async () => ({ userId: "u-chef", outletId: "outlet-1" }),
+        findFirst: async () => ({ userId: "u-chef", outletId: "outlet-1", roleId: "role-kitchen" }),
+        findMany: async () => [{ userId: "u-chef", outletId: "outlet-1", roleId: "role-kitchen" }],
+      },
+      role: {
+        findMany: async () => [{ id: "role-kitchen", name: "KITCHEN_USER", code: "KITCHEN_USER" }],
+      },
+      rolePermission: {
         findMany: async () => [
-          {
-            role: {
-              name: "KITCHEN_USER",
-              rolePermissions: [
-                { permission: { action: "kot.read" } },
-                { permission: { action: "kot.status.update" } },
-              ],
-            },
-          },
+          { roleId: "role-kitchen", permissionId: "perm-kot.read" },
+          { roleId: "role-kitchen", permissionId: "perm-kot.status.update" },
+        ],
+      },
+      permission: {
+        findMany: async () => [
+          { id: "perm-kot.read", action: "kot.read", code: "kot.read" },
+          { id: "perm-kot.status.update", action: "kot.status.update", code: "kot.status.update" },
         ],
       },
       auditLog: {
@@ -79,8 +90,11 @@ describe("RBAC Security & Negative Authorization Suite", () => {
     expect(mockPrisma.auditLog.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
-          action: "SECURITY_VIOLATION_TENANT_BREACH",
+          action: "OVERRIDE",
           entityId: "outlet-foreign",
+          afterState: expect.objectContaining({
+            originalAction: "SECURITY_VIOLATION_TENANT_BREACH",
+          }),
         }),
       })
     );
@@ -89,18 +103,20 @@ describe("RBAC Security & Negative Authorization Suite", () => {
   it("permits Super Admin with org-wide grant (outletId: null) across any outlet", async () => {
     const mockPrisma = {
       userRole: {
-        findFirst: async () => ({ userId: "u-admin", outletId: null }),
+        findFirst: async () => ({ userId: "u-admin", outletId: null, roleId: "role-admin" }),
+        findMany: async () => [{ userId: "u-admin", outletId: null, roleId: "role-admin" }],
+      },
+      role: {
+        findMany: async () => [{ id: "role-admin", name: "SUPER_ADMIN", code: "SUPER_ADMIN" }],
+      },
+      rolePermission: {
+        findMany: async () => [{ roleId: "role-admin", permissionId: "perm-order.void" }],
+      },
+      permission: {
         findMany: async () => [
-          {
-            role: {
-              name: "SUPER_ADMIN",
-              rolePermissions: [
-                { permission: { action: "order.create" } },
-                { permission: { action: "order.void" } },
-                { permission: { action: "payment.refund" } },
-              ],
-            },
-          },
+          { id: "perm-order.create", action: "order.create", code: "order.create" },
+          { id: "perm-order.void", action: "order.void", code: "order.void" },
+          { id: "perm-payment.refund", action: "payment.refund", code: "payment.refund" },
         ],
       },
       auditLog: {

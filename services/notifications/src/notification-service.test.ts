@@ -25,6 +25,9 @@ function makeRepo(overrides: Partial<NotificationRepository> = {}): Notification
     async markRead(): Promise<NotificationRecord | null> {
       return null;
     },
+    async markAllRead(): Promise<number> {
+      return 0;
+    },
     ...overrides,
   };
   return repo;

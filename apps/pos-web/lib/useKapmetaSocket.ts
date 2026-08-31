@@ -48,21 +48,6 @@ export function useKapmetaSocket(
           const payload = JSON.parse(event.data) as KapmetaSocketPayload;
           if (!payload?.topic || !FLOOR_EVENT_TOPICS.has(payload.topic)) return;
 
-          // #region agent log
-          fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-            body: JSON.stringify({
-              sessionId: "9c675b",
-              runId: "wave2-ws",
-              hypothesisId: "D",
-              location: "useKapmetaSocket.ts:onmessage",
-              message: "floor event",
-              data: { source, topic: payload.topic },
-              timestamp: Date.now(),
-            }),
-          }).catch(() => {});
-          // #endregion
 
           onEventRef.current(payload);
         } catch {

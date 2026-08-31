@@ -33,24 +33,18 @@ export class LoyaltyEngine {
 
       if (pointsEarned > 0) {
         await this.prisma.$transaction(async (tx) => {
-          // Update customer points
           await tx.customer.update({
             where: { id: customerId },
-            data: { loyaltyPoints: { increment: pointsEarned } }
+            data: { loyaltyPoints: { increment: pointsEarned } },
           });
 
-          // Record transaction
-          await tx.loyaltyTransaction.create({
-            data: {
-              outletId: event.outletId,
-              customerId,
-              orderId: order.id,
-              pointsEarned: pointsEarned,
-              pointsRedeemed: 0
-            }
+          await tx.loyalty_accounts.upsert({
+            where: { customer_id: customerId },
+            update: { balance: { increment: pointsEarned }, updated_at: new Date() },
+            create: { customer_id: customerId, balance: pointsEarned },
           });
         });
-        
+
         console.log(`[LoyaltyEngine] Awarded ${pointsEarned} points to customer ${order.customerId} for order ${order.id}`);
       }
     } catch (error) {
@@ -75,11 +69,13 @@ export class LoyaltyEngine {
     return await this.prisma.$transaction(async (tx) => {
       const updatedCustomer = await tx.customer.update({
         where: { id: customerId },
-        data: { loyaltyPoints: { decrement: pointsToRedeem } }
+        data: { loyaltyPoints: { decrement: pointsToRedeem } },
       });
-      
-      // Note: A real implementation would link this redemption to a specific Order/Discount ID. 
-      // For now we just deduct the points and assume it's applied via an external mechanism.
+
+      await tx.loyalty_accounts.updateMany({
+        where: { customer_id: customerId },
+        data: { balance: { decrement: pointsToRedeem }, updated_at: new Date() },
+      });
 
       return updatedCustomer;
     });

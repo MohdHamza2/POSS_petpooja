@@ -9,11 +9,13 @@ describe('IntegrationTranslator', () => {
         findUnique: vi.fn().mockResolvedValue({
           id: 'account-1',
           outletId: 'outlet-1',
-          itemMappings: [
-            { externalItemId: 'ext-item-1', menuItemId: 'internal-1' },
-            { externalItemId: 'ext-item-2', menuItemId: 'internal-2' },
-          ]
         })
+      },
+      channelItemMapping: {
+        findMany: vi.fn().mockResolvedValue([
+          { externalItemId: 'ext-item-1', menuItemId: 'internal-1' },
+          { externalItemId: 'ext-item-2', menuItemId: 'internal-2' },
+        ])
       }
     } as unknown as PrismaClient;
 
@@ -49,8 +51,10 @@ describe('IntegrationTranslator', () => {
         findUnique: vi.fn().mockResolvedValue({
           id: 'account-1',
           outletId: 'outlet-1',
-          itemMappings: [] // empty mappings
         })
+      },
+      channelItemMapping: {
+        findMany: vi.fn().mockResolvedValue([])
       }
     } as unknown as PrismaClient;
 

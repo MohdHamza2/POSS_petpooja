@@ -1,14 +1,17 @@
-// Applies db/migrations/*.sql in order, tracked in schema_migrations.
-// Replaces the Prisma placeholder — the real schema is the raw SQL in db/migrations/,
-// documented in docs/database/objects/DB-OBJECT-CATALOGUE.md. No ORM schema exists;
-// do not reintroduce one without an ADR (see docs/ENGINEERING-PROTOCOL.md §6).
+// Applies db/migrations/*.sql in order, tracked in schema_migrations,
+// then reconciles the live database to kapmeta/schema.prisma (the schema the
+// running API and POS actually use). Duplicate SQL objects are skipped;
+// any other SQL error is not recorded as applied.
 //
 // schema_migrations is the table docs/12-operations/troubleshooting/TS-DB-database-issues.md
 // already assumes exists — keep this name in sync if either changes.
 
 const fs = require('fs');
 const path = require('path');
+const { execSync } = require('child_process');
 const { Client } = require('pg');
+
+const DUPLICATE_SQLSTATES = new Set(['42P07', '42710', '42701', '42723', '42P06']);
 
 // Ensure root .env is loaded if DATABASE_URL is not already in environment
 const envPath = path.join(__dirname, '..', '.env');
@@ -30,6 +33,26 @@ if (fs.existsSync(envPath)) {
 }
 
 const MIGRATIONS_DIR = path.join(__dirname, '..', 'db', 'migrations');
+const ROOT_DIR = path.join(__dirname, '..');
+
+function isDuplicateSchemaError(err) {
+  if (err && DUPLICATE_SQLSTATES.has(err.code)) return true;
+  const msg = String((err && err.message) || '');
+  return /already exists/i.test(msg);
+}
+
+function reconcilePrismaSchema() {
+  console.log('[db:migrate] reconciling Prisma schema (kapmeta/schema.prisma) ...');
+  // CI empty databases may need destructive sync after overlapping historic SQL.
+  // Local developer databases never pass --accept-data-loss.
+  const extra = process.env.CI === 'true' ? ' --accept-data-loss' : '';
+  execSync(`npx prisma db push --schema=kapmeta/schema.prisma --skip-generate${extra}`, {
+    cwd: ROOT_DIR,
+    stdio: 'inherit',
+    env: process.env,
+  });
+  console.log('[db:migrate] Prisma schema is in sync.');
+}
 
 async function main() {
   const databaseUrl = process.env.DATABASE_URL || 'postgresql://pos:pos@localhost:5432/petpooja';
@@ -38,15 +61,12 @@ async function main() {
     process.exit(1);
   }
 
-  const files = fs
-    .readdirSync(MIGRATIONS_DIR)
-    .filter((f) => f.endsWith('.sql'))
-    .sort(); // filenames are zero-padded (0001_, 0002_, ...) — lexicographic sort is correct order
-
-  if (files.length === 0) {
-    console.log('[db:migrate] No .sql migrations found in db/migrations/. Nothing to do.');
-    return;
-  }
+  const files = fs.existsSync(MIGRATIONS_DIR)
+    ? fs
+        .readdirSync(MIGRATIONS_DIR)
+        .filter((f) => f.endsWith('.sql'))
+        .sort()
+    : [];
 
   const client = new Client({ connectionString: databaseUrl });
   await client.connect();
@@ -78,20 +98,27 @@ async function main() {
         ranCount += 1;
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {});
-        // If the database already has the tables (e.g. created via Prisma or initial baseline)
-        console.log(`[db:migrate] ${file}: schema objects already present. Recorded migration state.`);
-        await client.query('INSERT INTO schema_migrations (version) VALUES ($1) ON CONFLICT DO NOTHING', [file]);
+        if (isDuplicateSchemaError(err)) {
+          console.log(`[db:migrate] ${file}: schema objects already present. Recorded migration state.`);
+          await client.query('INSERT INTO schema_migrations (version) VALUES ($1) ON CONFLICT DO NOTHING', [file]);
+        } else {
+          console.warn(
+            `[db:migrate] ${file} did not apply (${err.code || 'unknown'}): ${err.message}. Leaving unrecorded; Prisma reconcile will fill gaps.`,
+          );
+        }
       }
     }
 
     if (ranCount === 0) {
-      console.log('[db:migrate] Database already up to date.');
+      console.log('[db:migrate] SQL migrations already up to date (or none pending).');
     } else {
-      console.log(`[db:migrate] Applied ${ranCount} migration(s).`);
+      console.log(`[db:migrate] Applied ${ranCount} SQL migration(s).`);
     }
   } finally {
     await client.end();
   }
+
+  reconcilePrismaSchema();
 }
 
 main().catch((err) => {
