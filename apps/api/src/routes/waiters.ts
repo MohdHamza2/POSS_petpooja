@@ -262,7 +262,7 @@ router.post("/waiters/me/shift-handover", requireAuth, async (req: AuthedRequest
         outletId: req.auth!.outletId,
         ...payload,
       });
-    }).catch(() => {});
+    }).catch(err => console.error('Background task error:', err?.message || err));
     // #region agent log
     fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'H1',location:'waiters.ts:POST shift-handover',message:'captain handover saved',data:{handoverId:row.id,businessDate:dayWindow.businessDate,cashSalesMinor:payload.cashSalesMinor,actualCash:payload.actualCashCountedMinor,netTip:payload.netTipPayoutMinor},timestamp:Date.now(),runId:'post-fix'})}).catch(()=>{});
     // #endregion

@@ -83,7 +83,7 @@ crmRouter.post("/customers", requireAuth, requirePermission("crm.write"), async 
         balance: Number(req.body.loyaltyPoints || 0),
         tier: "SILVER",
       },
-    }).catch(() => {});
+    }).catch(err => console.error('Background task error:', err?.message || err));
 
     res.status(201).json(mapCustomerResponse(customer));
   } catch (error: any) {
@@ -221,11 +221,53 @@ crmRouter.post("/loyalty/redeem", requireAuth, requirePermission("crm.write"), a
         balance: { decrement: pts },
         updated_at: new Date(),
       },
-    }).catch(() => {});
+    }).catch(err => console.error('Background task error:', err?.message || err));
 
     res.status(200).json(mapCustomerResponse(updatedCustomer));
   } catch (error: any) {
     console.error("Error redeeming loyalty points:", error);
     res.status(400).json({ error: error.message });
+  }
+});
+
+// POST /customers/:id/addresses - Add Delivery Address
+crmRouter.post("/customers/:id/addresses", requireAuth, requirePermission("crm.write"), async (req: AuthedRequest, res) => {
+  const { addressLine1, addressLine2, city, state, zipCode, isDefault } = req.body;
+  if (!addressLine1 || !city || !zipCode) {
+    return res.status(400).json({ error: "addressLine1, city, and zipCode are required" });
+  }
+
+  try {
+    const outletId = req.auth!.outletId;
+    const customer = await prisma.customer.findFirst({
+      where: { id: req.params.id, outletId },
+    });
+    if (!customer) {
+      return res.status(404).json({ error: "Customer not found" });
+    }
+
+    if (isDefault) {
+      await (prisma as any).customer_addresses.updateMany({
+        where: { customer_id: customer.id },
+        data: { is_default: false },
+      });
+    }
+
+    const address = await (prisma as any).customer_addresses.create({
+      data: {
+        customer_id: customer.id,
+        address_line1: addressLine1,
+        address_line2: addressLine2 || null,
+        city,
+        state: state || null,
+        zip_code: zipCode,
+        is_default: isDefault || false,
+      },
+    });
+
+    res.status(201).json({ success: true, address });
+  } catch (error: any) {
+    console.error("Error adding customer address:", error);
+    res.status(500).json({ error: error.message });
   }
 });

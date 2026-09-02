@@ -441,7 +441,7 @@ financeRouter.post("/petty-cash", requireAuth, requirePermission("report.read"),
         amountMinor: String(amount),
         category: row.category,
       });
-    }).catch(() => {});
+    }).catch(err => console.error('Background task error:', err?.message || err));
     // #region agent log
     fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'P1',location:'finance.ts:POST petty-cash',message:'petty cash recorded and broadcast',data:{amountMinor:String(amount),category:row.category,hasOpenSession:Boolean(session)},timestamp:Date.now(),runId:'petty-shift'})}).catch(()=>{});
     // #endregion
@@ -564,5 +564,113 @@ const handleReconcileShift = async (req: AuthedRequest, res: any) => {
 financeRouter.post("/cash-drawer/reconcile", requireAuth, requirePermission("report.read"), handleReconcileShift);
 financeRouter.post("/reconcile-shift", requireAuth, requirePermission("report.read"), handleReconcileShift);
 financeRouter.post("/close-shift", requireAuth, requirePermission("report.read"), handleReconcileShift);
+
+// POST /finance/card-settlement — Reconcile EDC/Card Machine batch
+financeRouter.post("/card-settlement", requireAuth, requirePermission("report.read"), async (req: AuthedRequest, res) => {
+  try {
+    const outletId = req.auth!.outletId;
+    const userId = req.auth!.userId;
+    const { batchAmountMinor, terminalId, notes } = req.body;
+
+    if (batchAmountMinor === undefined) {
+      return res.status(400).json({ error: "batchAmountMinor is required" });
+    }
+
+    const { start: startOfDay, end: endOfDay } = await outletBusinessDayWindow(outletId);
+    
+    // Find digital payments today
+    const digitalPayments = await prisma.payment.aggregate({
+      where: {
+        outletId,
+        method: { in: ["CARD", "UPI"] },
+        status: "CAPTURED",
+        createdAt: { gte: startOfDay, lt: endOfDay }
+      },
+      _sum: { amount: true }
+    });
+
+    const expectedDigitalMinor = digitalPayments._sum.amount ?? 0n;
+    const actualBatchMinor = BigInt(batchAmountMinor);
+    const varianceMinor = actualBatchMinor - expectedDigitalMinor;
+
+    // Log the EDC settlement
+    const log = await prisma.auditLog.create({
+      data: {
+        outletId,
+        actor_id: userId,
+        action: "UPDATE",
+        entityType: "FINANCE_EDC_SETTLEMENT",
+        entityId: terminalId || "EDC-01",
+        beforeState: { expectedDigitalMinor: String(expectedDigitalMinor) },
+        afterState: { actualBatchMinor: String(actualBatchMinor), varianceMinor: String(varianceMinor), notes },
+        createdAt: new Date(),
+      }
+    });
+
+    res.status(200).json({
+      success: true,
+      expectedDigitalMinor: String(expectedDigitalMinor),
+      actualBatchMinor: String(actualBatchMinor),
+      varianceMinor: String(varianceMinor),
+      logId: log.id
+    });
+  } catch (error: any) {
+    console.error("Error in card-settlement:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+import { createHash } from "crypto";
+
+// POST /finance/z-report/seal — Finalize the day and generate a tamper-proof hash
+financeRouter.post("/z-report/seal", requireAuth, requirePermission("report.read"), async (req: AuthedRequest, res) => {
+  const dateParam = req.body.date as string | undefined;
+  try {
+    const outletId = req.auth!.outletId;
+    const window = await outletBusinessDayWindow(outletId, dateParam || null);
+    
+    // Check if already sealed
+    const existingSeal = await prisma.auditLog.findFirst({
+      where: { outletId, entityType: "FINANCE_Z_REPORT", action: "APPROVE", entityId: window.businessDate }
+    });
+    if (existingSeal) {
+      return res.status(409).json({ error: "Z-Report for this business date is already sealed." });
+    }
+
+    const report = await zReportGenerator.generateDailyReport(outletId, window.businessDate);
+    
+    const hashPayload = JSON.stringify({
+      outletId,
+      date: report.date,
+      grandTotal: report.grandTotal.toString(),
+      totalSales: report.totalSales.toString(),
+      invoiceCount: report.invoiceCount,
+    });
+    
+    const hash = createHash('sha256').update(hashPayload).digest('hex');
+
+    const log = await prisma.auditLog.create({
+      data: {
+        outletId,
+        actor_id: req.auth!.userId,
+        action: "APPROVE",
+        entityType: "FINANCE_Z_REPORT",
+        entityId: window.businessDate,
+        afterState: { 
+          hash, 
+          signature: hashPayload,
+          grandTotal: report.grandTotal.toString(),
+          totalSales: report.totalSales.toString() 
+        },
+        createdAt: new Date(),
+      }
+    });
+
+    res.status(200).json({ success: true, hash, logId: log.id, businessDate: window.businessDate });
+  } catch (error: any) {
+    console.error("Error sealing z-report:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 

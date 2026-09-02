@@ -58,7 +58,7 @@ const handleUpdateOutletStatus = async (req: AuthedRequest, res: any) => {
         deliveryActive: status.deliveryActive,
         pickupActive: status.pickupActive,
       });
-    }).catch(() => {});
+    }).catch(err => console.error('Background task error:', err?.message || err));
 
     res.status(200).json(toClientStatus(status));
     // #region agent log

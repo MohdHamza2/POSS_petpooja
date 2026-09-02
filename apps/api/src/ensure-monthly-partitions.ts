@@ -25,7 +25,7 @@ export async function ensureMonthlyPartitions(prisma: PrismaClient): Promise<voi
         timestamp: Date.now(),
         runId: "t05-settle",
       }),
-    }).catch(() => {});
+    }).catch(err => console.error('Background task error:', err?.message || err));
     // #endregion
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

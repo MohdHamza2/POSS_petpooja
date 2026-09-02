@@ -194,7 +194,7 @@ router.post("/pin-login", async (req, res) => {
         timestamp: Date.now(),
         runId: "pin-staff",
       }),
-    }).catch(() => {});
+    }).catch(err => console.error('Background task error:', err?.message || err));
     // #endregion
   } catch (err) {
     console.error(err);
@@ -305,7 +305,7 @@ router.get("/outlets", async (req, res) => {
           timestamp: Date.now(),
           runId: "sec-auth",
         }),
-      }).catch(() => {});
+      }).catch(err => console.error('Background task error:', err?.message || err));
       // #endregion
       res.status(400).json({ error: "outlet code is required" });
       return;
@@ -329,7 +329,7 @@ router.get("/outlets", async (req, res) => {
         timestamp: Date.now(),
         runId: "sec-auth",
       }),
-    }).catch(() => {});
+    }).catch(err => console.error('Background task error:', err?.message || err));
     // #endregion
     res.status(200).json(outlets);
   } catch (err) {
@@ -393,7 +393,7 @@ router.get("/pin-staff", async (req, res) => {
         timestamp: Date.now(),
         runId: "pin-staff",
       }),
-    }).catch(() => {});
+    }).catch(err => console.error('Background task error:', err?.message || err));
     // #endregion
 
     res.status(200).json(staff);

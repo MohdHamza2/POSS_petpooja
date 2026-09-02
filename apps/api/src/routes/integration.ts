@@ -47,7 +47,7 @@ async function resolveWebhookCustomer(outletId: string, customer: { name?: strin
       balance: 0,
       tier: "SILVER",
     },
-  }).catch(() => {});
+  }).catch(err => console.error('Background task error:', err?.message || err));
   return created.id;
 }
 
@@ -454,11 +454,11 @@ router.post(["/webhooks/:channel", "/webhooks/swiggy", "/webhooks/zomato"], asyn
         orderId: createdOrder.id,
         to_status: "CONFIRMED",
       },
-    }).catch(() => {});
+    }).catch(err => console.error('Background task error:', err?.message || err));
 
     const { onOrderConfirmed, stepOrderTo } = await import("../orchestration/order-lifecycle");
     await stepOrderTo(prisma, createdOrder.id, "KOT_CREATED", outletId);
-    await onOrderConfirmed(createdOrder.id, prisma).catch(() => {});
+    await onOrderConfirmed(createdOrder.id, prisma).catch(err => console.error('Background task error:', err?.message || err));
 
     // 6. Record Immutable Webhook Audit Log
     await prisma.auditLog.create({
@@ -493,7 +493,7 @@ router.post(["/webhooks/:channel", "/webhooks/swiggy", "/webhooks/zomato"], asyn
         orderId: createdOrder.id,
         channel: channelParam,
       });
-    }).catch(() => {});
+    }).catch(err => console.error('Background task error:', err?.message || err));
 
     res.status(201).json({
       ok: true,

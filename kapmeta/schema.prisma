@@ -1003,6 +1003,7 @@ model ingredients {
   updated_by           String?                @db.Uuid
   purchase_order_items purchase_order_items[]
   recipe_ingredients   recipe_ingredients[]
+  wastage_logs         InventoryWastageLog[]
 
   @@index([outlet_id], map: "idx_ingredients_outlet")
 }
@@ -1190,5 +1191,21 @@ model WaiterShiftHandover {
   @@index([outletId, businessDate], map: "idx_waiter_shift_handovers_outlet_date")
   @@index([waiterId], map: "idx_waiter_shift_handovers_waiter")
   @@map("waiter_shift_handovers")
+}
+
+model InventoryWastageLog {
+  id             String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  outletId       String      @map("outlet_id") @db.Uuid
+  ingredientId   String      @map("ingredient_id") @db.Uuid
+  quantity       Decimal     @db.Decimal(10, 3)
+  reason         String
+  loggedAt       DateTime    @default(now()) @map("logged_at") @db.Timestamptz(6)
+  loggedBy       String      @map("logged_by") @db.Uuid
+  financeEntryId String?     @map("finance_entry_id") @db.Uuid
+  ingredients    ingredients @relation(fields: [ingredientId], references: [id])
+
+  @@index([outletId], map: "idx_wastage_log_outlet")
+  @@index([ingredientId], map: "idx_wastage_log_ingredient")
+  @@map("inventory_wastage_log")
 }
 

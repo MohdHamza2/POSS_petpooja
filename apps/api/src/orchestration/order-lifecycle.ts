@@ -173,7 +173,7 @@ export async function onOrderConfirmed(orderId: string, prisma: PrismaClient): P
         broadcast("order.updated", { orderId: order.id, diningTableId: order.diningTableId });
         broadcast("table.status_updated", { tableId: order.diningTableId, orderId: order.id, status: "OCCUPIED" });
       }
-    }).catch(() => {});
+    }).catch(err => console.error('Background task error:', err?.message || err));
   } catch (err) {
     console.error(`onOrderConfirmed: KOT creation failed for order ${orderId}`, err);
   }

@@ -596,7 +596,7 @@ router.patch(
           timestamp: Date.now(),
           runId: "pin-e2e",
         }),
-      }).catch(() => {});
+      }).catch(err => console.error('Background task error:', err?.message || err));
       // #endregion
     } catch (err) {
       console.error(err);

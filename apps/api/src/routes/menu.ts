@@ -460,7 +460,7 @@ router.patch("/items/:menuItemId/availability", requireAuth, requirePermission("
         beforeState: { isStocked: item.isActive },
         afterState: { isStocked: nextState !== "OFF", version: newVersion },
       },
-    }).catch(() => {});
+    }).catch(err => console.error('Background task error:', err?.message || err));
 
     res.status(200).json({ newVersion, isStocked: nextState !== "OFF" });
     // #region agent log

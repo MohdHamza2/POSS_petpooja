@@ -606,7 +606,7 @@ inventoryRouter.post("/purchase-orders/:id/receive", requireAuth, requirePermiss
         poNumber: po.po_number,
         receivedCount: receivedItems.length,
       });
-    }).catch(() => {});
+    }).catch(err => console.error('Background task error:', err?.message || err));
 
     res.status(200).json({
       ok: true,
@@ -671,6 +671,143 @@ inventoryRouter.get("/availability/export", requireAuth, requirePermission("inve
     res.status(200).json(payload);
   } catch (error: any) {
     console.error("Error exporting availability:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /inventory/wastage - Log ingredient wastage/spoilage
+inventoryRouter.post("/wastage", requireAuth, requirePermission("inventory.write"), async (req: AuthedRequest, res) => {
+  const { ingredientId, quantity, reason } = req.body;
+
+  if (!ingredientId || quantity === undefined || !reason) {
+    return res.status(400).json({ error: "Missing ingredientId, quantity, or reason" });
+  }
+
+  try {
+    const outletId = req.auth!.outletId;
+    const userId = req.auth!.userId;
+
+    const existing = await prisma.ingredients.findFirst({
+      where: { id: ingredientId, outlet_id: outletId },
+    });
+    if (!existing) {
+      return res.status(404).json({ error: "Ingredient not found" });
+    }
+
+    const newStock = Number(existing.current_stock_qty) - Number(quantity);
+
+    await prisma.$transaction(async (tx) => {
+      // 1. Deduct stock
+      await tx.ingredients.update({
+        where: { id: ingredientId },
+        data: {
+          current_stock_qty: newStock,
+          updated_at: new Date(),
+          updated_by: userId,
+        },
+      });
+
+      // 2. Log to InventoryWastageLog
+      const log = await (tx as any).inventoryWastageLog.create({
+        data: {
+          outletId,
+          ingredientId,
+          quantity: Number(quantity),
+          reason,
+          loggedBy: userId,
+        },
+      });
+
+      // 3. Write Audit Log
+      await tx.auditLog.create({
+        data: {
+          outletId,
+          actor_id: userId,
+          action: "CREATE",
+          entityType: "INVENTORY_WASTAGE",
+          entityId: log.id,
+          beforeState: { currentStock: Number(existing.current_stock_qty) },
+          afterState: { currentStock: newStock, wastageAmount: Number(quantity), reason },
+          createdAt: new Date(),
+        },
+      });
+    });
+
+    res.status(200).json({ success: true, currentStock: newStock, message: "Wastage logged successfully" });
+  } catch (error: any) {
+    console.error("Error logging wastage:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /inventory/purchase-orders/:id/pay - Pay a vendor for a purchase order
+inventoryRouter.post("/purchase-orders/:id/pay", requireAuth, requirePermission("inventory.write"), async (req: AuthedRequest, res) => {
+  const poId = req.params.id;
+  
+  try {
+    const outletId = req.auth!.outletId;
+    const userId = req.auth!.userId;
+    const paymentMethod = req.body.paymentMethod || "CASH";
+    const paymentRef = req.body.paymentRef || null;
+
+    const po = await prisma.purchase_orders.findFirst({
+      where: { id: poId, outlet_id: outletId },
+      include: { vendors: true }
+    });
+
+    if (!po) {
+      return res.status(404).json({ error: "Purchase order not found" });
+    }
+
+    if (po.status === "PAID") {
+      return res.status(400).json({ error: "Purchase order is already paid" });
+    }
+
+    const newStatus = "PAID";
+
+    await prisma.$transaction(async (tx) => {
+      // 1. Update PO Status
+      await tx.purchase_orders.update({
+        where: { id: poId },
+        data: {
+          status: newStatus,
+          updated_at: new Date(),
+          updated_by: userId,
+        },
+      });
+
+      // 2. Record to Petty Cash Ledger if cash
+      if (paymentMethod === "CASH") {
+        await tx.petty_cash_ledger.create({
+          data: {
+            outlet_id: outletId,
+            amount_minor: -po.total_amount_minor, // Expense
+            category: "VENDOR_PAYMENT",
+            description: `Payment for PO ${po.po_number} to ${po.vendors?.name}`,
+            paid_to: po.vendors?.name || "Vendor",
+            recorded_by: userId,
+          }
+        });
+      }
+
+      // 3. Audit Log
+      await tx.auditLog.create({
+        data: {
+          outletId,
+          actor_id: userId,
+          action: "UPDATE",
+          entityType: "INVENTORY_PO_PAYMENT",
+          entityId: poId,
+          beforeState: { status: po.status },
+          afterState: { status: newStatus, paymentMethod, paymentRef, amount: Number(po.total_amount_minor) },
+          createdAt: new Date(),
+        },
+      });
+    });
+
+    res.status(200).json({ success: true, message: "Purchase order marked as paid", status: newStatus });
+  } catch (error: any) {
+    console.error("Error paying purchase order:", error);
     res.status(500).json({ error: error.message });
   }
 });

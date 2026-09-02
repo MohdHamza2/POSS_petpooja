@@ -377,5 +377,30 @@ router.get("/invoices", requireAuth, requirePermission("report.read"), async (re
   }
 });
 
+router.get("/live-occupancy", requireAuth, requirePermission("report.read"), async (req: AuthedRequest, res) => {
+  try {
+    const outletId = req.auth!.outletId;
+
+    const allTables = await prisma.diningTable.findMany({
+      where: { outletId, isActive: true },
+      select: { id: true, status: true }
+    });
+
+    const totalTables = allTables.length;
+    const occupiedTables = allTables.filter(t => t.status === "OCCUPIED").length;
+    
+    const occupancyRate = totalTables > 0 ? (occupiedTables / totalTables) * 100 : 0;
+
+    res.status(200).json({
+      totalTables,
+      occupiedTables,
+      occupancyRatePercent: occupancyRate.toFixed(2),
+    });
+  } catch (error: any) {
+    console.error("Error fetching live occupancy:", error);
+    res.status(500).json({ error: "internal error" });
+  }
+});
+
 export const reportingRouter = router;
 

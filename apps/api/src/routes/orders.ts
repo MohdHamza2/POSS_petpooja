@@ -107,6 +107,15 @@ ordersRouter.post("/orders", requireAuth, async (req: AuthedRequest, res) => {
     const isAdvance = Boolean(body.scheduledFireAt);
     const isHold = body.action === "HOLD";
     const ops = await loadOutletOpsStatus(outletId);
+    
+    // Shift Close Lock: Prevent new bills if no shift is open
+    const openSession = await prisma.cash_drawer_sessions.findFirst({
+      where: { outlet_id: outletId, status: "OPEN" },
+    });
+    if (!openSession) {
+      return res.status(403).json({ error: "Shift is closed. Please open a cash drawer session to punch new bills.", code: "SHIFT_CLOSED" });
+    }
+
     const paused = channelPausedReason(ops, requestedType);
     if (paused) {
       // #region agent log
@@ -158,13 +167,13 @@ ordersRouter.post("/orders", requireAuth, async (req: AuthedRequest, res) => {
           req.auth!.userId,
           modifierPriceLookup
         );
-        await onItemsAdded(existingLive.id, prisma).catch(() => {});
+        await onItemsAdded(existingLive.id, prisma).catch(err => console.error('Background task error:', err?.message || err));
         if (body.action === "KOT" || body.status === "ACTIVE" || body.status === "KOT_CREATED") {
           if (existingLive.status === "DRAFT" || existingLive.status === "PLACED") {
-            await transitionOrder(existingLive.id, "CONFIRMED", orderRepo, req.auth!.userId).catch(() => {});
-            await transitionOrder(existingLive.id, "KOT_CREATED", orderRepo, req.auth!.userId).catch(() => {});
+            await transitionOrder(existingLive.id, "CONFIRMED", orderRepo, req.auth!.userId).catch(err => console.error('Background task error:', err?.message || err));
+            await transitionOrder(existingLive.id, "KOT_CREATED", orderRepo, req.auth!.userId).catch(err => console.error('Background task error:', err?.message || err));
           }
-          await onOrderConfirmed(existingLive.id, prisma).catch(() => {});
+          await onOrderConfirmed(existingLive.id, prisma).catch(err => console.error('Background task error:', err?.message || err));
         }
         await occupyMergeMembers(prisma, outletId, diningTableId);
         await stampOrderMergeLabel(prisma, outletId, existingLive.id, diningTableId);
@@ -176,7 +185,7 @@ ordersRouter.post("/orders", requireAuth, async (req: AuthedRequest, res) => {
           for (const id of attachMembers.length > 0 ? attachMembers : [diningTableId]) {
             broadcast("table.status_updated", { tableId: id, orderId: existingLive.id, status: "OCCUPIED" });
           }
-        }).catch(() => {});
+        }).catch(err => console.error('Background task error:', err?.message || err));
         return res.status(200).json({ ...orderDetail, added, attachedToExisting: true });
       }
     }
@@ -206,7 +215,7 @@ ordersRouter.post("/orders", requireAuth, async (req: AuthedRequest, res) => {
           : (body.tableNumber ? String(body.tableNumber) : undefined),
         created_by: body.waiterId || userId,
       },
-    }).catch(() => {});
+    }).catch(err => console.error('Background task error:', err?.message || err));
 
     if (body.scheduledFireAt) {
       await prisma.order.update({
@@ -295,7 +304,7 @@ ordersRouter.post("/orders", requireAuth, async (req: AuthedRequest, res) => {
           }
         }
       }
-    }).catch(() => {});
+    }).catch(err => console.error('Background task error:', err?.message || err));
 
     res.status(201).json({
       ...result,
@@ -571,7 +580,7 @@ ordersRouter.patch("/orders/:id/status", requireAuth, async (req: AuthedRequest,
     }
 
     if (mappedTarget === "CONFIRMED" || mappedTarget === "KOT_CREATED") {
-      await onOrderConfirmed(orderId, prisma).catch(() => {});
+      await onOrderConfirmed(orderId, prisma).catch(err => console.error('Background task error:', err?.message || err));
     }
 
     let kotCascade: { ticketIds: string[]; from: string[]; target: string } | null = null;
@@ -585,7 +594,7 @@ ordersRouter.patch("/orders/:id/status", requireAuth, async (req: AuthedRequest,
 
     if (mappedTarget === "COMPLETED") {
       if (order.diningTableId) {
-        await dissolveMergeGroupForTable(prisma, order.outletId, order.diningTableId).catch(() => {});
+        await dissolveMergeGroupForTable(prisma, order.outletId, order.diningTableId).catch(err => console.error('Background task error:', err?.message || err));
       }
     }
 
@@ -600,7 +609,7 @@ ordersRouter.patch("/orders/:id/status", requireAuth, async (req: AuthedRequest,
           broadcast("kot.status_updated", { kotTicketId, orderId, status: kotCascade.target });
         }
       }
-    }).catch(() => {});
+    }).catch(err => console.error('Background task error:', err?.message || err));
 
     res.status(200).json({ ok: stepResult.ok, from: stepResult.from, applied: stepResult.applied, kotCascade });
   } catch (err: any) {
@@ -717,7 +726,7 @@ ordersRouter.post("/orders/:id/items", requireAuth, async (req: AuthedRequest, r
       userId,
       modifierPriceLookup
     );
-    await onItemsAdded(req.params.id, prisma).catch(() => {});
+    await onItemsAdded(req.params.id, prisma).catch(err => console.error('Background task error:', err?.message || err));
     const live = await prisma.order.findFirst({
       where: { id: req.params.id, outletId },
       select: { id: true, diningTableId: true, table_number: true, orderType: true },
@@ -736,7 +745,7 @@ ordersRouter.post("/orders/:id/items", requireAuth, async (req: AuthedRequest, r
       for (const id of itemMembers) {
         broadcast("table.status_updated", { tableId: id, orderId: req.params.id, status: "OCCUPIED" });
       }
-    }).catch(() => {});
+    }).catch(err => console.error('Background task error:', err?.message || err));
     res.status(200).json(added);
   } catch (err: any) {
     console.error("Error adding items to order:", err);
@@ -873,8 +882,8 @@ ordersRouter.post("/orders/:id/fire-advance", requireAuth, async (req: AuthedReq
       where: { id: orderId },
       data: { advanceStatus: "FIRED" },
     }).catch(() => undefined);
-    await transitionOrder(orderId, "CONFIRMED", orderRepo, req.auth!.userId).catch(() => {});
-    await transitionOrder(orderId, "KOT_CREATED", orderRepo, req.auth!.userId).catch(() => {});
+    await transitionOrder(orderId, "CONFIRMED", orderRepo, req.auth!.userId).catch(err => console.error('Background task error:', err?.message || err));
+    await transitionOrder(orderId, "KOT_CREATED", orderRepo, req.auth!.userId).catch(err => console.error('Background task error:', err?.message || err));
     await onOrderConfirmed(orderId, prisma);
     // #region agent log
     fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'D1',location:'orders.ts:fire-advance',message:'advance fired without occupying table',data:{orderId,orderType:existing.orderType,diningTableId:existing.diningTableId||null,occupied:false},timestamp:Date.now(),runId:'modes'})}).catch(()=>{});
@@ -929,7 +938,7 @@ ordersRouter.post("/orders/:id/cancel", requireAuth, async (req: AuthedRequest, 
       for (const id of dissolved.ids.length > 0 ? dissolved.ids : order.diningTableId ? [order.diningTableId] : []) {
         broadcast("table.status_updated", { tableId: id, orderId, status: "VACANT" });
       }
-    }).catch(() => {});
+    }).catch(err => console.error('Background task error:', err?.message || err));
 
     res.status(200).json({ ok: true, orderId, status: "CANCELLED", reason: reason || reasonCode || "CUSTOMER_CANCELLED" });
   } catch (err: any) {
@@ -1048,7 +1057,7 @@ ordersRouter.post("/orders/:id/print", requireAuth, async (req: AuthedRequest, r
         tableNumber: order.table_number,
         printJobId,
       });
-    }).catch(() => {});
+    }).catch(err => console.error('Background task error:', err?.message || err));
 
     res.status(200).json({
       ok: true,
