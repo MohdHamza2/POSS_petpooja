@@ -8,6 +8,7 @@ import {
   guestPhoneForForm,
 } from "../lib/resolve-customer";
 import { useKapmetaSocket } from "../lib/useKapmetaSocket";
+import { channelPausedMessage, opsStatusFromPayload, type OutletOpsStatus } from "../lib/channel-ops";
 import BillSplitModal from "./BillSplitModal";
 import AttractiveMenuItemCard, { MenuItemData } from "./menu/AttractiveMenuItemCard";
 import MenuCustomizerModal, { CustomizedItemSelection } from "./menu/MenuCustomizerModal";
@@ -96,6 +97,14 @@ export default function PosBillingView({
   const [processingOrder, setProcessingOrder] = useState(false);
   const [guestPhone, setGuestPhone] = useState("");
   const [guestName, setGuestName] = useState("");
+  const [channelOps, setChannelOps] = useState<OutletOpsStatus | null>(null);
+  const offFloor = orderMode === "DELIVERY" || orderMode === "PICKUP";
+  const modePausedReason = channelPausedMessage(channelOps, orderMode);
+  const [scheduleFireAt, setScheduleFireAt] = useState("");
+  const orderTableBinding = () =>
+    offFloor
+      ? { tableNumber: orderMode === "DELIVERY" ? "DELIVERY" : "PICKUP", diningTableId: undefined as string | undefined }
+      : { tableNumber, diningTableId: initialTableId || undefined };
   const [outletProfile, setOutletProfile] = useState<{
     name: string;
     address: string | null;
@@ -104,12 +113,19 @@ export default function PosBillingView({
 
   // Modals & Feedback
   const [receiptModal, setReceiptModal] = useState<any | null>(null);
-  const [kotFeedback, setKotFeedback] = useState<{ orderNumber: string; items: string[] } | null>(null);
+  const [kotFeedback, setKotFeedback] = useState<{ orderNumber: string; items: string[]; deferredUntil?: string | null } | null>(null);
 
   // Load Menu & Running Table Order
   useEffect(() => {
     loadMenu();
-    loadActiveTableOrder();
+    loadChannelOps();
+    if (orderMode === "DINE_IN") {
+      loadActiveTableOrder();
+    } else {
+      setActiveOrder(null);
+      setRunningItems([]);
+      setTableKots([]);
+    }
     fetchMe().then((me) => {
       if (me?.outlet) {
         setOutletProfile({
@@ -119,13 +135,31 @@ export default function PosBillingView({
         });
       }
     }).catch(() => undefined);
-  }, [initialTableId, initialTable, resumeHoldId]);
+  }, [initialTableId, initialTable, resumeHoldId, orderMode]);
+
+  const loadChannelOps = async () => {
+    try {
+      const res = await authedFetch("/settings/store-status");
+      if (!res.ok) return;
+      const data = await res.json();
+      setChannelOps(opsStatusFromPayload(data));
+    } catch {
+      /* keep last known flags */
+    }
+  };
 
   useKapmetaSocket(
-    () => {
-      loadActiveTableOrder();
+    (payload) => {
+      if (payload.topic === "outlet.store_status_updated") {
+        setChannelOps(opsStatusFromPayload(payload.data));
+        // #region agent log
+        fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb",{method:"POST",headers:{"Content-Type":"application/json","X-Debug-Session-Id":"9c675b"},body:JSON.stringify({sessionId:"9c675b",hypothesisId:"CH5",location:"PosBillingView.tsx:socket",message:"store status socket applied",data:{deliveryActive:payload.data?.deliveryActive,pickupActive:payload.data?.pickupActive,isOnline:payload.data?.isOnline},timestamp:Date.now(),runId:"channel-pause"})}).catch(()=>{});
+        // #endregion
+        return;
+      }
+      if (orderMode === "DINE_IN" && (initialTableId || initialTable)) loadActiveTableOrder();
     },
-    Boolean(initialTableId || initialTable),
+    true,
     "pos-billing"
   );
 
@@ -413,6 +447,10 @@ export default function PosBillingView({
     }));
 
   const handleHoldCart = async () => {
+    if (modePausedReason) {
+      alert(modePausedReason);
+      return;
+    }
     if (cart.length === 0) {
       alert("Add items to the cart before holding. Kitchen tickets on a running table stay on the table.");
       return;
@@ -422,8 +460,7 @@ export default function PosBillingView({
       const payload = {
         action: "HOLD",
         orderType: orderMode,
-        tableNumber,
-        diningTableId: initialTableId || undefined,
+        ...orderTableBinding(),
         customerId: await existingOrResolvedCustomerId({ existingId: activeOrder?.customerId, phone: guestPhone, name: guestName }),
         lines: cartLines(),
       };
@@ -445,6 +482,10 @@ export default function PosBillingView({
   };
 
   const handleKotAndPrint = async () => {
+    if (modePausedReason) {
+      alert(modePausedReason);
+      return;
+    }
     const parked = activeOrder && (activeOrder.advanceStatus === "HELD" || activeOrder.status === "DRAFT" || activeOrder.status === "PLACED");
     if (cart.length === 0) {
       if (parked && activeOrder?.id) {
@@ -493,20 +534,29 @@ export default function PosBillingView({
           throw new Error(errJson.error || "Failed to add items to active order");
         }
         if (parked) {
-          await authedFetch(`/orders/${activeOrder.id}/fire-advance`, { method: "POST" });
+          const fireRes = await authedFetch(`/orders/${activeOrder.id}/fire-advance`, { method: "POST" });
+          if (!fireRes.ok) {
+            const errJson = await fireRes.json().catch(() => ({}));
+            throw new Error(errJson.error || "Failed to send held order to kitchen");
+          }
         }
         orderNum = activeOrder.orderNumber;
       } else {
         const payload = {
           action: "KOT",
           orderType: orderMode,
-          tableNumber,
-          diningTableId: initialTableId || undefined,
+          ...orderTableBinding(),
           covers: coversCount,
           waiterName,
           customerId: await existingOrResolvedCustomerId({ existingId: activeOrder?.customerId, phone: guestPhone, name: guestName }),
           lines: cartLines(),
           status: "KOT_CREATED",
+          ...(scheduleFireAt
+            ? {
+                scheduledFireAt: new Date(scheduleFireAt).toISOString(),
+                promisedAt: new Date(scheduleFireAt).toISOString(),
+              }
+            : {}),
         };
 
         const res = await authedFetch("/orders", {
@@ -526,7 +576,23 @@ export default function PosBillingView({
       setKotFeedback({
         orderNumber: orderNum,
         items: dispatchedList,
+        deferredUntil: scheduleFireAt ? new Date(scheduleFireAt).toISOString() : null,
       });
+      // #region agent log
+      fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
+        body: JSON.stringify({
+          sessionId: "9c675b",
+          hypothesisId: "ADV1",
+          location: "PosBillingView.tsx:handleKotAndPrint",
+          message: "KOT feedback after create",
+          data: { orderNum, deferred: Boolean(scheduleFireAt), orderMode },
+          timestamp: Date.now(),
+          runId: "agg-post",
+        }),
+      }).catch(() => {});
+      // #endregion
 
       setCart([]);
       await loadActiveTableOrder();
@@ -538,23 +604,98 @@ export default function PosBillingView({
   };
 
   const handlePrintAndEBill = async () => {
+    if (modePausedReason) {
+      alert(modePausedReason);
+      return;
+    }
     if (cart.length === 0 && runningItems.length === 0) {
       alert("Please select items or open a running table to print bill.");
       return;
     }
     setProcessingOrder(true);
     try {
+      // #region agent log
+      fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb",{method:"POST",headers:{"Content-Type":"application/json","X-Debug-Session-Id":"9c675b"},body:JSON.stringify({sessionId:"9c675b",hypothesisId:"DUE1",location:"PosBillingView.tsx:handlePrintAndEBill",message:"print bill settle gate",data:{isPaidChecked,paymentMethod,hasActiveOrder:Boolean(activeOrder?.id),orderId:activeOrder?.id||null,cartLen:cart.length,runningLen:runningItems.length},timestamp:Date.now(),runId:"due-print"})}).catch(()=>{});
+      // #endregion
       const allDisplayItems = [
         ...runningItems.map((r) => ({ name: r.menuItemName, qty: r.quantity, price: r.subtotalMinor })),
         ...cart.map((c) => ({ name: c.item.name, qty: c.quantity, price: c.itemTotalMinor })),
       ];
 
-      let orderNumber = activeOrder?.orderNumber || "INV-001";
+      let orderNumber = activeOrder?.orderNumber || "BILL";
       const customerId = await existingOrResolvedCustomerId({
         existingId: activeOrder?.customerId,
         phone: guestPhone,
         name: guestName,
       });
+      const settleNow = isPaidChecked;
+      // #region agent log
+      fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb",{method:"POST",headers:{"Content-Type":"application/json","X-Debug-Session-Id":"9c675b"},body:JSON.stringify({sessionId:"9c675b",hypothesisId:"DUE1",location:"PosBillingView.tsx:handlePrintAndEBill",message:"print settle branch",data:{settleNow,isPaidChecked,paymentMethod,hasActiveOrder:Boolean(activeOrder?.id),orderId:activeOrder?.id||null},timestamp:Date.now(),runId:"due-print-post"})}).catch(()=>{});
+      // #endregion
+
+      if (!settleNow) {
+        let printOrderId = activeOrder?.id || null;
+        if (cart.length > 0) {
+          if (activeOrder?.id) {
+            const addRes = await authedFetch(`/orders/${activeOrder.id}/items`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ lines: cartLines() }),
+            });
+            if (!addRes.ok) {
+              const errJson = await addRes.json().catch(() => ({}));
+              throw new Error(errJson.error || "Failed to append items to order");
+            }
+            orderNumber = activeOrder.orderNumber || orderNumber;
+            printOrderId = activeOrder.id;
+          } else {
+            const kotRes = await authedFetch("/orders", {
+              method: "POST",
+              body: JSON.stringify({
+                action: "KOT",
+                orderType: orderMode,
+                ...orderTableBinding(),
+                covers: coversCount,
+                waiterName,
+                customerId,
+                lines: cartLines(),
+                status: "KOT_CREATED",
+              }),
+            });
+            if (!kotRes.ok) {
+              const errJson = await kotRes.json().catch(() => ({}));
+              throw new Error(errJson.error || "Failed to open order for unpaid bill");
+            }
+            const kotData = await kotRes.json();
+            orderNumber = kotData.orderNumber || orderNumber;
+            printOrderId = kotData.id || printOrderId;
+          }
+        }
+        if (printOrderId) {
+          await authedFetch(`/orders/${printOrderId}/print`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ document_type: "bill" }),
+          }).catch(() => {});
+        }
+        setReceiptModal({
+          orderNumber,
+          tableNumber,
+          paymentMethod,
+          totalSubtotalMinor,
+          taxMinor,
+          grandTotalMinor,
+          items: allDisplayItems,
+          createdAt: new Date().toISOString(),
+          settled: false,
+        });
+        setCart([]);
+        await loadActiveTableOrder();
+        // #region agent log
+        fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb",{method:"POST",headers:{"Content-Type":"application/json","X-Debug-Session-Id":"9c675b"},body:JSON.stringify({sessionId:"9c675b",hypothesisId:"L4",location:"PosBillingView.tsx:handlePrintAndEBill",message:"unpaid print skipped settle",data:{orderNumber,printOrderId,paymentMethod,settleNow:false},timestamp:Date.now(),runId:"leftover-post"})}).catch(()=>{});
+        // #endregion
+        return;
+      }
 
       if (activeOrder?.id) {
         // If there are staged cart items, append them first
@@ -596,12 +737,10 @@ export default function PosBillingView({
         fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'R1',location:'PosBillingView.tsx:handlePrintAndEBill',message:'print settle invoice label',data:{invoiceLabel,invoiceNumbers:settleData.invoiceNumbers||null,invoiceNumber:settleData.invoiceNumber||null,orderId:activeOrder.id},timestamp:Date.now(),runId:'waiter-e2e'})}).catch(()=>{});
         // #endregion
       } else {
-        // Create and settle new order
         const payload = {
           action: "BILL",
           orderType: orderMode,
-          tableNumber,
-          diningTableId: initialTableId || undefined,
+          ...orderTableBinding(),
           covers: coversCount,
           waiterName,
           paymentMethod,
@@ -639,6 +778,7 @@ export default function PosBillingView({
         grandTotalMinor,
         items: allDisplayItems,
         createdAt: new Date().toISOString(),
+        settled: true,
       });
 
       setCart([]);
@@ -657,6 +797,14 @@ export default function PosBillingView({
   // the bill total (last row absorbs the rounding remainder). Previously this
   // only fired an alert() and never settled.
   const handleConfirmSplit = async (details: { splitType: string; numGuests: number; perGuestMinor: number }) => {
+    if (modePausedReason) {
+      alert(modePausedReason);
+      return;
+    }
+    if (!isPaidChecked) {
+      alert("Check It's Paid before splitting. Unpaid bills stay open on the table.");
+      return;
+    }
     setIsSplitModalOpen(false);
     setProcessingOrder(true);
     try {
@@ -671,8 +819,7 @@ export default function PosBillingView({
           body: JSON.stringify({
             action: "KOT",
             orderType: orderMode,
-            tableNumber,
-            diningTableId: initialTableId || undefined,
+            ...orderTableBinding(),
             covers: coversCount,
             waiterName,
             customerId: await existingOrResolvedCustomerId({ existingId: activeOrder?.customerId, phone: guestPhone, name: guestName }),
@@ -700,7 +847,10 @@ export default function PosBillingView({
 
       const total = grandTotalMinor;
       const n = Math.max(1, details.numGuests || 1);
-      const method = paymentMethod && paymentMethod !== "DUE" ? paymentMethod : "CASH";
+      const method = paymentMethod || "CASH";
+      // #region agent log
+      fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb",{method:"POST",headers:{"Content-Type":"application/json","X-Debug-Session-Id":"9c675b"},body:JSON.stringify({sessionId:"9c675b",hypothesisId:"DUE3",location:"PosBillingView.tsx:handleConfirmSplit",message:"split remaps due",data:{paymentMethod,mappedMethod:method,isPaidChecked},timestamp:Date.now(),runId:"due-print"})}).catch(()=>{});
+      // #endregion
       const payments: { method: string; amountMinor: number }[] = [];
       if (details.splitType === "EQUAL") {
         const base = Math.floor(total / n);
@@ -827,25 +977,59 @@ export default function PosBillingView({
           <button
             type="button"
             className={`mode-tab ${orderMode === "DINE_IN" ? "active" : ""}`}
-            onClick={() => setOrderMode("DINE_IN")}
+            disabled={Boolean(channelPausedMessage(channelOps, "DINE_IN"))}
+            onClick={() => {
+              // #region agent log
+              fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb",{method:"POST",headers:{"Content-Type":"application/json","X-Debug-Session-Id":"9c675b"},body:JSON.stringify({sessionId:"9c675b",hypothesisId:"CH4",location:"PosBillingView.tsx:mode-tab",message:"switch dine-in",data:{paused:Boolean(channelPausedMessage(channelOps,"DINE_IN"))},timestamp:Date.now(),runId:"channel-pause"})}).catch(()=>{});
+              // #endregion
+              setOrderMode("DINE_IN");
+            }}
           >
             🍽️ Dine In
           </button>
           <button
             type="button"
             className={`mode-tab ${orderMode === "DELIVERY" ? "active" : ""}`}
-            onClick={() => setOrderMode("DELIVERY")}
+            disabled={Boolean(channelPausedMessage(channelOps, "DELIVERY"))}
+            onClick={() => {
+              // #region agent log
+              fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb",{method:"POST",headers:{"Content-Type":"application/json","X-Debug-Session-Id":"9c675b"},body:JSON.stringify({sessionId:"9c675b",hypothesisId:"CH4",location:"PosBillingView.tsx:mode-tab",message:"switch delivery",data:{paused:Boolean(channelPausedMessage(channelOps,"DELIVERY"))},timestamp:Date.now(),runId:"channel-pause"})}).catch(()=>{});
+              // #endregion
+              setOrderMode("DELIVERY");
+            }}
           >
             🛵 Delivery
           </button>
           <button
             type="button"
             className={`mode-tab ${orderMode === "PICKUP" ? "active" : ""}`}
-            onClick={() => setOrderMode("PICKUP")}
+            disabled={Boolean(channelPausedMessage(channelOps, "PICKUP"))}
+            onClick={() => {
+              // #region agent log
+              fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb",{method:"POST",headers:{"Content-Type":"application/json","X-Debug-Session-Id":"9c675b"},body:JSON.stringify({sessionId:"9c675b",hypothesisId:"CH4",location:"PosBillingView.tsx:mode-tab",message:"switch pickup",data:{paused:Boolean(channelPausedMessage(channelOps,"PICKUP"))},timestamp:Date.now(),runId:"channel-pause"})}).catch(()=>{});
+              // #endregion
+              setOrderMode("PICKUP");
+            }}
           >
             🛍️ Pick Up
           </button>
         </div>
+        {modePausedReason && (
+          <div role="status" style={{ fontSize: 12, fontWeight: 700, color: "#b91c1c" }}>
+            {modePausedReason}
+          </div>
+        )}
+        {offFloor && (
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "#475569" }}>
+            Schedule kitchen
+            <input
+              type="datetime-local"
+              value={scheduleFireAt}
+              onChange={(e) => setScheduleFireAt(e.target.value)}
+              style={{ border: "1px solid #cbd5e1", borderRadius: 6, padding: "4px 8px" }}
+            />
+          </label>
+        )}
 
         {onBackToTables && (
           <button type="button" className="btn-back-tables" onClick={onBackToTables}>
@@ -919,8 +1103,8 @@ export default function PosBillingView({
           <div className="cart-table-meta-bar">
             <div className="table-badge-group">
               <span className="table-tag-icon">T</span>
-              <span className="table-name-label">{tableNumber}</span>
-              <span className="section-badge">{tableSection}</span>
+              <span className="table-name-label">{offFloor ? orderMode : tableNumber}</span>
+              <span className="section-badge">{offFloor ? "Off floor" : tableSection}</span>
               {runningItems.length > 0 && (
                 <span className="live-running-badge">● Running Order</span>
               )}
@@ -1202,6 +1386,7 @@ export default function PosBillingView({
                 type="button"
                 className="btn-hold-cart"
                 onClick={handleHoldCart}
+                disabled={processingOrder || Boolean(modePausedReason)}
                 title="Park / Hold Order"
               >
                 ⏸ Hold
@@ -1211,7 +1396,7 @@ export default function PosBillingView({
                 type="button"
                 className="btn-print-ebill"
                 onClick={handlePrintAndEBill}
-                disabled={processingOrder || (cart.length === 0 && runningItems.length === 0)}
+                disabled={processingOrder || Boolean(modePausedReason) || (cart.length === 0 && runningItems.length === 0)}
               >
                 {processingOrder ? "Printing..." : "Print & E-Bill"}
               </button>
@@ -1220,7 +1405,7 @@ export default function PosBillingView({
                 type="button"
                 className="btn-kot-print"
                 onClick={handleKotAndPrint}
-                disabled={processingOrder || (cart.length === 0 && runningItems.length === 0)}
+                disabled={processingOrder || Boolean(modePausedReason) || (cart.length === 0 && runningItems.length === 0)}
               >
                 {processingOrder ? "Sending..." : "KOT & Print"}
               </button>
@@ -1253,12 +1438,16 @@ export default function PosBillingView({
         <div className="modal-backdrop" onClick={() => setKotFeedback(null)}>
           <div className="modal-dialog-card" onClick={(e) => e.stopPropagation()}>
             <div className="dialog-header success-header">
-              <span style={{ fontSize: "1.5rem" }}>🍳</span>
-              <h3 style={{ margin: 0, fontSize: "1.125rem", fontWeight: 800 }}>KOT Ticket Dispatched!</h3>
+              <span style={{ fontSize: "1.5rem" }}>{kotFeedback.deferredUntil ? "🗓️" : "🍳"}</span>
+              <h3 style={{ margin: 0, fontSize: "1.125rem", fontWeight: 800 }}>
+                {kotFeedback.deferredUntil ? "Advance order scheduled" : "KOT Ticket Dispatched!"}
+              </h3>
             </div>
             <div className="dialog-body">
               <p style={{ margin: "0 0 12px", color: "#334155", fontWeight: 600 }}>
-                KOT #{kotFeedback.orderNumber} sent to Kitchen KDS for <strong>Table {tableNumber}</strong>:
+                {kotFeedback.deferredUntil
+                  ? `Order #${kotFeedback.orderNumber} is scheduled for kitchen fire at ${new Date(kotFeedback.deferredUntil).toLocaleString("en-IN")} for ${offFloor ? orderMode : `Table ${tableNumber}`}. Kitchen KDS will not see it until then.`
+                  : `KOT #${kotFeedback.orderNumber} sent to Kitchen KDS for ${offFloor ? orderMode : `Table ${tableNumber}`}:`}
               </p>
               <ul className="dispatched-items-list">
                 {kotFeedback.items.map((it, idx) => (
@@ -1307,7 +1496,7 @@ export default function PosBillingView({
                 <div className="receipt-divider">================================</div>
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8125rem", fontWeight: 700 }}>
                   <span>Table: {receiptModal.tableNumber}</span>
-                  <span>Inv #{receiptModal.orderNumber}</span>
+                  <span>{receiptModal.settled === false ? "Order #" : "Inv #"}{receiptModal.orderNumber}</span>
                 </div>
                 <div style={{ fontSize: "0.75rem", color: "#64748b", textAlign: "left", marginTop: "2px" }}>
                   Date: {new Date(receiptModal.createdAt).toLocaleString()}
@@ -1344,8 +1533,8 @@ export default function PosBillingView({
                   <span>GRAND TOTAL:</span>
                   <span>₹{(receiptModal.grandTotalMinor / 100).toFixed(2)}</span>
                 </div>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8125rem", color: "#16a34a", fontWeight: 700, marginTop: "4px" }}>
-                  <span>Paid via {receiptModal.paymentMethod}:</span>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8125rem", color: receiptModal.settled === false ? "#b45309" : "#16a34a", fontWeight: 700, marginTop: "4px" }}>
+                  <span>{receiptModal.settled === false ? "AMOUNT DUE:" : `Paid via ${receiptModal.paymentMethod}:`}</span>
                   <span>₹{(receiptModal.grandTotalMinor / 100).toFixed(2)}</span>
                 </div>
               </div>
@@ -1366,6 +1555,7 @@ export default function PosBillingView({
               >
                 🖨️ Print Receipt
               </button>
+              {receiptModal.settled !== false ? (
               <button
                 type="button"
                 style={{ background: "#4f46e5", color: "#fff", border: "none", padding: "8px 14px", borderRadius: "6px", fontWeight: 700, cursor: "pointer", fontSize: "0.8125rem" }}
@@ -1376,6 +1566,7 @@ export default function PosBillingView({
               >
                 🧹 Clear & Mark Vacant
               </button>
+              ) : null}
               <button
                 type="button"
                 className="btn-close-receipt"
@@ -1423,6 +1614,11 @@ export default function PosBillingView({
           font-weight: 700;
           color: #64748b;
           cursor: pointer;
+        }
+        .mode-tab:disabled {
+          opacity: 0.4;
+          cursor: not-allowed;
+          text-decoration: line-through;
         }
         .mode-tab.active {
           background: #f1f5f9;

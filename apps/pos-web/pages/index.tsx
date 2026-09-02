@@ -37,10 +37,12 @@ export default function POSIndexPage() {
   const handleNewOrder = () => {
     setSelectedTable("Direct");
     setSelectedTableId("");
+    setSelectedOrderMode("DINE_IN");
     setViewMode("BILLING");
   };
 
   const handleSelectTableFromFloor = (table: any) => {
+    setSelectedOrderMode("DINE_IN");
     setSelectedTable(table.tableNumber);
     setSelectedTableId(table.id);
     setViewMode("BILLING");
@@ -77,10 +79,14 @@ export default function POSIndexPage() {
           onSelectTable={handleSelectTableFromFloor}
           onNavigateDelivery={() => {
             setSelectedOrderMode("DELIVERY");
+            setSelectedTable("DELIVERY");
+            setSelectedTableId("");
             setViewMode("BILLING");
           }}
           onNavigatePickup={() => {
             setSelectedOrderMode("PICKUP");
+            setSelectedTable("PICKUP");
+            setSelectedTableId("");
             setViewMode("BILLING");
           }}
         />
@@ -94,6 +100,8 @@ export default function POSIndexPage() {
             // #region agent log
             fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'K3',location:'index.tsx:onBackToTables',message:'Done back to floor',data:{hasSession:Boolean(getSession()),path:typeof window!=='undefined'?window.location.pathname:null},timestamp:Date.now(),runId:'cover-0029'})}).catch(()=>{});
             // #endregion
+            setSelectedOrderMode("DINE_IN");
+            setSelectedTableId("");
             setViewMode("FLOOR");
             router.push("/", undefined, { shallow: true });
           }}

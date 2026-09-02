@@ -3,6 +3,7 @@ import { requireAuth, requirePermission, type AuthedRequest } from "../middlewar
 import { prisma } from "../prisma";
 import { transitionOrder, PrismaOrderRepository } from "@kapmeta/orders";
 import { writeAuditLog } from "@kapmeta/shared-types/audit-log";
+import { deductBomStockForOrder } from "../orchestration/inventory-depletion";
 import {
   applyMergeGroup,
   dissolveMergeGroupForTable,
@@ -13,6 +14,8 @@ import {
   resolveAnchorTable,
   stampOrderMergeLabel,
 } from "../orchestration/table-merge";
+import { outletBusinessDayWindow } from "../outlet-business-day";
+import { isLiveFloorSession, type FloorWindow } from "../floor-session";
 
 const orderRepo = new PrismaOrderRepository(prisma);
 export const tablesRouter = Router();
@@ -31,30 +34,21 @@ const OPEN_ORDER_STATUSES = [
 const QUEUED_KOT_STATUSES = new Set(["QUEUED", "KOT_CREATED", "PENDING"]);
 const COOKING_KOT_STATUSES = new Set(["PREPARING", "IN_PREPARATION", "COOKING"]);
 
-function isLiveFloorSession(order: any): boolean {
-  if (order.advanceStatus === "HELD") return false;
-  const kots = order.kotTickets || [];
-  const items = order.orderItems || [];
-  const unserved = kots.some(
-    (k: any) => k.status !== "CANCELLED" && k.status !== "SERVED"
-  );
-  if (order.status === "COMPLETED") return unserved;
-  if (unserved) return true;
-  if (kots.some((k: any) => k.status !== "CANCELLED")) return true;
-  if (order.status === "DRAFT" && items.length > 0) return true;
-  if (order.status === "SERVED" || order.status === "HANDED_OVER") return true;
-  return false;
+async function floorWindowForOutlet(outletId: string): Promise<FloorWindow> {
+  const { start: dayStart } = await outletBusinessDayWindow(outletId);
+  return { dayStart, overnightCookCutoff: new Date(dayStart.getTime() - 24 * 60 * 60 * 1000) };
 }
 
 function deriveKitchenStage(activeOrder: any): "QUEUED" | "COOKING" | "READY" | "SERVED" | null {
   const kots = activeOrder.kotTickets || [];
   const statuses = kots.map((k: any) => k.status);
-  const stage = kots.some((k: any) => QUEUED_KOT_STATUSES.has(k.status))
-    ? "QUEUED"
+  // Ready food can be served while other tickets are still cooking.
+  const stage = kots.some((k: any) => k.status === "READY")
+    ? "READY"
     : kots.some((k: any) => COOKING_KOT_STATUSES.has(k.status))
       ? "COOKING"
-      : kots.some((k: any) => k.status === "READY")
-        ? "READY"
+      : kots.some((k: any) => QUEUED_KOT_STATUSES.has(k.status))
+        ? "QUEUED"
         : null;
   // #region agent log
   if (kots.length > 1 && new Set(statuses).size > 1) {
@@ -72,12 +66,28 @@ function deriveKitchenStage(activeOrder: any): "QUEUED" | "COOKING" | "READY" | 
   return null;
 }
 
-function deriveFloorStatus(activeOrder: any): "RUNNING" | "RUNNING_KOT" | "PRINTED" | "PAID" {
+function deriveFloorStatus(activeOrder: any, billPrinted = false): "RUNNING" | "RUNNING_KOT" | "PRINTED" | "PAID" {
   const kots = activeOrder.kotTickets || [];
-  if (activeOrder.status === "PAID" || activeOrder.status === "SETTLED") return "PAID";
-  if (activeOrder.status === "PRINTED" || activeOrder.status === "BILLING") return "PRINTED";
+  if (billPrinted) return "PRINTED";
   if (kots.some((k: any) => k.status !== "CANCELLED")) return "RUNNING_KOT";
   return "RUNNING";
+}
+
+async function orderIdsWithBillPrint(outletId: string, orderIds: string[]): Promise<Set<string>> {
+  if (orderIds.length === 0) return new Set();
+  const rows = await prisma.auditLog.findMany({
+    where: {
+      outletId,
+      entityType: "ORDER",
+      entityId: { in: orderIds },
+    },
+    select: { entityId: true, afterState: true },
+  });
+  const ids = new Set<string>();
+  for (const row of rows) {
+    if ((row.afterState as any)?.originalAction === "BILL_PRINT") ids.add(row.entityId);
+  }
+  return ids;
 }
 
 function serializeCurrentOrder(activeOrder: any) {
@@ -128,6 +138,7 @@ function mergeFieldsForTable(t: any, members: any[]) {
 tablesRouter.get("/tables", requireAuth, async (req: AuthedRequest, res) => {
   try {
     const outletId = req.auth!.outletId;
+    const floorWindow = await floorWindowForOutlet(outletId);
     const dissolvedOrphans = await dissolvePaidEmptyMergeGroups(prisma, outletId);
     if (dissolvedOrphans.length > 0) {
     }
@@ -140,6 +151,7 @@ tablesRouter.get("/tables", requireAuth, async (req: AuthedRequest, res) => {
     const activeOrders = await (prisma.order as any).findMany({
       where: {
         outletId,
+        orderType: "DINE_IN",
         diningTableId: { in: tableIds },
         OR: [
           { status: { in: [...OPEN_ORDER_STATUSES] } },
@@ -171,7 +183,7 @@ tablesRouter.get("/tables", requireAuth, async (req: AuthedRequest, res) => {
 
     const orderMap = new Map<string, any>();
     activeOrders.forEach((ord: any) => {
-      if (ord.diningTableId && isLiveFloorSession(ord) && !orderMap.has(ord.diningTableId)) {
+      if (ord.diningTableId && isLiveFloorSession(ord, floorWindow) && !orderMap.has(ord.diningTableId)) {
         orderMap.set(ord.diningTableId, ord);
       }
     });
@@ -214,6 +226,12 @@ tablesRouter.get("/tables", requireAuth, async (req: AuthedRequest, res) => {
       }).catch(() => {});
     }
 
+    const printedIds = await orderIdsWithBillPrint(outletId, [...orderMap.values()].map((o: any) => o.id));
+
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'OCC1',location:'tables.ts:GET /tables',message:'floor live map after window',data:{dayStart:floorWindow.dayStart.toISOString(),overnightCookCutoff:floorWindow.overnightCookCutoff.toISOString(),printedCount:printedIds.size,printed:[...printedIds],live:[...orderMap.entries()].map(([tid,o]:any)=> ({tableId:tid,n:o.orderNumber,status:o.status,printed:printedIds.has(o.id),createdAt:o.createdAt,kot:(o.kotTickets||[]).map((k:any)=>k.status)}))},timestamp:Date.now(),runId:'leftover-post'})}).catch(()=>{});
+    // #endregion
+
     const mapped = tables.map((t: any) => {
       const members = t.mergeGroupId ? groupMembers.get(t.mergeGroupId) || [t] : [t];
       const extra = mergeFieldsForTable(t, members);
@@ -237,7 +255,7 @@ tablesRouter.get("/tables", requireAuth, async (req: AuthedRequest, res) => {
       }
 
       const kitchenStage = deriveKitchenStage(activeOrder);
-      const computedStatus = deriveFloorStatus(activeOrder);
+      const computedStatus = deriveFloorStatus(activeOrder, printedIds.has(activeOrder.id));
 
       return {
         id: t.id,
@@ -355,12 +373,14 @@ tablesRouter.post("/tables/:id/serve", requireAuth, async (req: AuthedRequest, r
     const activeOrder = await (prisma.order as any).findFirst({
       where: {
         outletId,
+        orderType: "DINE_IN",
         diningTableId: anchor?.id || tableId,
-        status: { in: ["DRAFT", "PLACED", "CONFIRMED", "KOT_CREATED", "IN_PREPARATION", "READY", "SERVED"] },
+        status: { in: ["DRAFT", "PLACED", "CONFIRMED", "KOT_CREATED", "IN_PREPARATION", "READY", "SERVED", "HANDED_OVER"] },
       },
       include: {
         kotTickets: {
           where: { status: { notIn: ["CANCELLED", "SERVED"] } },
+          include: { kotItems: true },
         },
       },
       orderBy: { createdAt: "desc" },
@@ -371,6 +391,9 @@ tablesRouter.post("/tables/:id/serve", requireAuth, async (req: AuthedRequest, r
     }
 
     const kotsToServe = (activeOrder.kotTickets || []).filter((k: any) => k.status === "READY");
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'S1',location:'tables.ts:POST /serve',message:'waiter serve table',data:{tableId,orderId:activeOrder.id,orderStatus:activeOrder.status,ticketStatuses:(activeOrder.kotTickets||[]).map((k:any)=>k.status),readyCount:kotsToServe.length},timestamp:Date.now(),runId:'waiter-serve'})}).catch(()=>{});
+    // #endregion
     if (kotsToServe.length === 0) {
       return res.status(409).json({ error: "No READY tickets to serve. Wait until kitchen marks food ready." });
     }
@@ -382,6 +405,16 @@ tablesRouter.post("/tables/:id/serve", requireAuth, async (req: AuthedRequest, r
         data: { status: "SERVED", servedAt: new Date() },
       }).catch(() => {});
     }
+
+    const servedItemIds = [...new Set(
+      kotsToServe.flatMap((k: any) => (k.kotItems || []).map((i: any) => i.orderItemId).filter(Boolean))
+    )] as string[];
+    if (servedItemIds.length > 0) {
+      await deductBomStockForOrder(activeOrder.id, outletId, prisma, userId, "TABLE_SERVED", servedItemIds);
+    }
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'I',location:'tables.ts:POST /serve',message:'serve-time BOM item ids',data:{tableId,orderId:activeOrder.id,servedKotCount:kotsToServe.length,servedItemIds},timestamp:Date.now(),runId:'serve-bom'})}).catch(()=>{});
+    // #endregion
 
     // Update order status to SERVED only when no queued/cooking tickets remain
     const leftover = (activeOrder.kotTickets || []).filter(
@@ -437,11 +470,13 @@ tablesRouter.post("/tables/:id/serve", requireAuth, async (req: AuthedRequest, r
 tablesRouter.get("/tables/occupancy", requireAuth, async (req: AuthedRequest, res) => {
   try {
     const outletId = req.auth!.outletId;
+    const floorWindow = await floorWindowForOutlet(outletId);
     const tables = await prisma.diningTable.findMany({
       where: { outletId, isActive: true },
       include: {
         orders: {
           where: {
+            orderType: "DINE_IN",
             OR: [
               { status: { in: [...OPEN_ORDER_STATUSES] } },
               {
@@ -476,7 +511,7 @@ tablesRouter.get("/tables/occupancy", requireAuth, async (req: AuthedRequest, re
     const liveGroupIds = new Set<string>();
     for (const t of tables) {
       const groupId = (t as any).mergeGroupId as string | null;
-      if (groupId && t.orders.some((ord: any) => isLiveFloorSession(ord))) {
+      if (groupId && t.orders.some((ord: any) => isLiveFloorSession(ord, floorWindow))) {
         liveGroupIds.add(groupId);
       }
     }
@@ -484,7 +519,7 @@ tablesRouter.get("/tables/occupancy", requireAuth, async (req: AuthedRequest, re
     for (const t of tables) {
       const groupId = (t as any).mergeGroupId as string | null;
       const isOccupied =
-        t.orders.some((ord: any) => isLiveFloorSession(ord))
+        t.orders.some((ord: any) => isLiveFloorSession(ord, floorWindow))
         || Boolean(groupId && liveGroupIds.has(groupId));
       const cap = t.capacity || 4;
       totalCapacity += cap;
@@ -527,7 +562,7 @@ tablesRouter.get("/tables/occupancy", requireAuth, async (req: AuthedRequest, re
     }));
 
     // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'W2',location:'tables.ts:GET /occupancy',message:'occupancy snapshot',data:{occupiedTables,totalTables,occupancyRatePercent:Number(occupancyRatePercent.toFixed(1)),liveGroupCount:liveGroupIds.size},timestamp:Date.now(),runId:'waiter-e2e'})}).catch(()=>{});
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'OCC2',location:'tables.ts:GET /occupancy',message:'occupancy snapshot',data:{occupiedTables,totalTables,occupancyRatePercent:Number(occupancyRatePercent.toFixed(1)),liveGroupCount:liveGroupIds.size,dayStart:floorWindow.dayStart.toISOString(),occupied:tables.filter((t)=>t.orders.some((ord)=>isLiveFloorSession(ord, floorWindow))||Boolean((t as any).mergeGroupId&&liveGroupIds.has((t as any).mergeGroupId))).map((t)=>({n:t.tableNumber,status:t.status,liveOrders:(t.orders||[]).filter((o:any)=>isLiveFloorSession(o, floorWindow)).map((o:any)=>({num:o.orderNumber,status:o.status,createdAt:o.createdAt,kot:(o.kotTickets||[]).map((k:any)=>k.status)}))}))},timestamp:Date.now(),runId:'occ-post'})}).catch(()=>{});
     // #endregion
     res.status(200).json({
       outletId,
@@ -638,6 +673,7 @@ tablesRouter.get("/tables/sections", requireAuth, async (req: AuthedRequest, res
 tablesRouter.get("/tables/:id", requireAuth, async (req: AuthedRequest, res) => {
   try {
     const outletId = req.auth!.outletId;
+    const floorWindow = await floorWindowForOutlet(outletId);
     if (req.params.id.length < 30) {
       return res.status(404).json({ error: "Table not found" });
     }
@@ -646,6 +682,7 @@ tablesRouter.get("/tables/:id", requireAuth, async (req: AuthedRequest, res) => 
       include: {
         orders: {
           where: {
+            orderType: "DINE_IN",
             OR: [
               { status: { in: [...OPEN_ORDER_STATUSES] } },
               {
@@ -667,7 +704,8 @@ tablesRouter.get("/tables/:id", requireAuth, async (req: AuthedRequest, res) => 
       return res.status(404).json({ error: "Table not found" });
     }
 
-    const activeOrder = ((table as any).orders || []).find((ord: any) => isLiveFloorSession(ord)) || null;
+    const activeOrder = ((table as any).orders || []).find((ord: any) => isLiveFloorSession(ord, floorWindow)) || null;
+    const printedIds = activeOrder ? await orderIdsWithBillPrint(outletId, [activeOrder.id]) : new Set<string>();
     res.status(200).json({
       id: table.id,
       outletId: table.outletId,
@@ -675,7 +713,7 @@ tablesRouter.get("/tables/:id", requireAuth, async (req: AuthedRequest, res) => 
       name: table.tableNumber,
       capacity: table.capacity,
       section: table.section,
-      status: activeOrder ? deriveFloorStatus(activeOrder) : "VACANT",
+      status: activeOrder ? deriveFloorStatus(activeOrder, printedIds.has(activeOrder.id)) : "VACANT",
       kitchenStage: activeOrder ? deriveKitchenStage(activeOrder) : null,
       isActive: table.isActive,
       activeOrderId: activeOrder?.id || null,

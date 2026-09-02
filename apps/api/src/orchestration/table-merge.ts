@@ -1,4 +1,6 @@
 import { randomUUID } from "crypto";
+import { outletBusinessDayWindow } from "../outlet-business-day";
+import { isLiveFloorSession } from "../floor-session";
 
 const OPEN_ORDER_STATUSES = [
   "DRAFT",
@@ -13,21 +15,6 @@ const OPEN_ORDER_STATUSES = [
 
 export function formatMergedTableLabel(numbers: string[]): string {
   return [...new Set(numbers.filter(Boolean))].join(" + ");
-}
-
-function isLiveFloorSession(order: any): boolean {
-  if (order.advanceStatus === "HELD") return false;
-  const kots = order.kotTickets || [];
-  const items = order.orderItems || [];
-  const unserved = kots.some(
-    (k: any) => k.status !== "CANCELLED" && k.status !== "SERVED"
-  );
-  if (order.status === "COMPLETED") return unserved;
-  if (unserved) return true;
-  if (kots.some((k: any) => k.status !== "CANCELLED")) return true;
-  if (order.status === "DRAFT" && items.length > 0) return true;
-  if (order.status === "SERVED" || order.status === "HANDED_OVER") return true;
-  return false;
 }
 
 export async function expandMergeMemberIds(
@@ -159,7 +146,9 @@ export async function findLiveOrdersOnTables(
     },
     orderBy: { createdAt: "asc" },
   });
-  return orders.filter((o: any) => isLiveFloorSession(o));
+  const { start: dayStart } = await outletBusinessDayWindow(outletId);
+  const window = { dayStart, overnightCookCutoff: new Date(dayStart.getTime() - 24 * 60 * 60 * 1000) };
+  return orders.filter((o: any) => isLiveFloorSession(o, window));
 }
 
 export async function foldOrdersInto(

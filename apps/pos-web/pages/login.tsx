@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import Head from "next/head";
 import { useRouter } from "next/router";
-import { login, logout } from "../lib/auth";
+import { login, fetchPublicOutlets, type OutletSummary } from "../lib/auth";
 import CaptainPinLoginModal from "../components/CaptainPinLoginModal";
 
 // Human-readable messages for LoginFailure["reason"] (packages/shared-types/auth.ts).
@@ -13,71 +13,54 @@ const ERROR_MESSAGES: Record<string, string> = {
   LOGIN_FAILED: "Login failed. Please verify credentials and try again.",
 };
 
-interface QuickRole {
-  key: string;
-  label: string;
-  roleTitle: string;
-  icon: string;
-  email: string;
-  password: string;
-  outletId: string;
-  targetPath: string;
-}
-
-const QUICK_ROLES: QuickRole[] = [
-  {
-    key: "admin",
-    label: "ADMIN",
-    roleTitle: "Super Admin / Owner",
-    icon: "🛡️",
-    email: "admin@restaurant.com",
-    password: "admin123",
-    outletId: "a0deb015-8ef8-4ef5-aac7-6e91c9da6b5b",
-    targetPath: "/",
-  },
-  {
-    key: "cashier",
-    label: "CASHIER",
-    roleTitle: "Front Desk Cashier",
-    icon: "💳",
-    email: "",
-    password: "",
-    outletId: "a0deb015-8ef8-4ef5-aac7-6e91c9da6b5b",
-    targetPath: "/",
-  },
-  {
-    key: "chef",
-    label: "CHEF",
-    roleTitle: "Kitchen Display Staff",
-    icon: "👨‍🍳",
-    email: "",
-    password: "",
-    outletId: "a0deb015-8ef8-4ef5-aac7-6e91c9da6b5b",
-    targetPath: "/kitchen",
-  },
-  {
-    key: "waiter",
-    label: "WAITER",
-    roleTitle: "Floor Staff",
-    icon: "🍽️",
-    email: "",
-    password: "",
-    outletId: "a0deb015-8ef8-4ef5-aac7-6e91c9da6b5b",
-    targetPath: "/waiter",
-  },
-];
-
 export default function LoginPage() {
   const router = useRouter();
-  const [email, setEmail] = useState("admin@restaurant.com");
-  const [password, setPassword] = useState("admin123");
-  const [outletId, setOutletId] = useState("a0deb015-8ef8-4ef5-aac7-6e91c9da6b5b");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [outlets, setOutlets] = useState<OutletSummary[]>([]);
+  const [outletCode, setOutletCode] = useState("");
+  const [outletId, setOutletId] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const [activeRoleKey, setActiveRoleKey] = useState<string | null>(null);
   const [isPinModalOpen, setIsPinModalOpen] = useState(false);
+
+  useEffect(() => {
+    const trimmed = outletCode.trim();
+    if (trimmed.length < 2) {
+      setOutlets([]);
+      setOutletId("");
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      fetchPublicOutlets(trimmed).then((rows) => {
+        if (cancelled) return;
+        setOutlets(rows);
+        setOutletId(rows[0]?.id || "");
+        // #region agent log
+        fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
+          body: JSON.stringify({
+            sessionId: "9c675b",
+            hypothesisId: "S1",
+            location: "login.tsx:loadOutlets",
+            message: "login outlets from code lookup",
+            data: { count: rows.length, codes: rows.map((o) => o.code) },
+            timestamp: Date.now(),
+            runId: "sec-auth",
+          }),
+        }).catch(() => {});
+        // #endregion
+      });
+    }, 300);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [outletCode]);
 
   const performLogin = async (eMail: string, pass: string, outId: string, targetPath = "/") => {
     setError(null);
@@ -96,7 +79,6 @@ export default function LoginPage() {
       }
       setNotice(null);
       setSubmitting(false);
-      setActiveRoleKey(null);
       return;
     }
 
@@ -109,14 +91,6 @@ export default function LoginPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     await performLogin(email, password, outletId, "/");
-  };
-
-  const handleQuickAccess = async (role: QuickRole) => {
-    setActiveRoleKey(role.key);
-    setEmail(role.email);
-    setPassword(role.password);
-    setOutletId(role.outletId);
-    await performLogin(role.email, role.password, role.outletId, role.targetPath);
   };
 
   return (
@@ -192,22 +166,44 @@ export default function LoginPage() {
           </div>
 
           <div className="field-group">
-            <label className="field-label" htmlFor="outletId">
-              Outlet ID
+            <label className="field-label" htmlFor="outletCode">
+              Outlet code
             </label>
             <div className="input-wrapper">
               <span className="input-icon">🏢</span>
               <input
-                id="outletId"
+                id="outletCode"
                 type="text"
+                required
+                value={outletCode}
+                onChange={(e) => setOutletCode(e.target.value)}
+                className="field-input"
+                placeholder="Enter outlet code"
+                autoComplete="organization"
+              />
+            </div>
+            {outletCode.trim().length >= 2 && outlets.length === 0 && (
+              <p className="welcome-subtitle">No active outlet matches that code.</p>
+            )}
+            {outlets.length > 1 && (
+              <select
+                id="outletId"
                 required
                 value={outletId}
                 onChange={(e) => setOutletId(e.target.value)}
                 className="field-input"
-                placeholder="11111111-1111-1111-1111-111111111111"
-                autoComplete="off"
-              />
-            </div>
+                style={{ marginTop: 8 }}
+              >
+                {outlets.map((outlet) => (
+                  <option key={outlet.id} value={outlet.id}>
+                    {outlet.name} ({outlet.code})
+                  </option>
+                ))}
+              </select>
+            )}
+            {outlets.length === 1 && (
+              <p className="welcome-subtitle">{outlets[0].name} ({outlets[0].code})</p>
+            )}
           </div>
 
           <button type="submit" className="submit-btn" disabled={submitting}>
@@ -215,43 +211,19 @@ export default function LoginPage() {
           </button>
         </form>
 
-        {/* Quick Access Section */}
         <div className="quick-access-section">
           <div className="quick-access-divider">
-            <span>QUICK ACCESS</span>
+            <span>STAFF PIN</span>
           </div>
-
-          <div className="quick-access-buttons">
-            {QUICK_ROLES.map((role) => {
-              const isActive = activeRoleKey === role.key;
-              return (
-                <button
-                  key={role.key}
-                  type="button"
-                  className={`quick-access-btn ${isActive ? "active" : ""}`}
-                  disabled={submitting}
-                  onClick={() => handleQuickAccess(role)}
-                  title={`Sign in directly as ${role.roleTitle}`}
-                >
-                  <div className="icon-circle">
-                    {isActive ? "⏳" : role.icon}
-                  </div>
-                  <span className="role-label">{role.label}</span>
-                </button>
-              );
-            })}
-          </div>
-
-          <div style={{ marginTop: "16px", paddingTop: "14px", borderTop: "1px dashed #cbd5e1" }}>
-            <button
-              type="button"
-              className="fast-pin-btn"
-              onClick={() => setIsPinModalOpen(true)}
-            >
-              <span style={{ fontSize: "1.1rem" }}>⚡</span>
-              <span>Fast Captain / Waiter Touch PIN Login</span>
-            </button>
-          </div>
+          <button
+            type="button"
+            className="fast-pin-btn"
+            onClick={() => setIsPinModalOpen(true)}
+            disabled={!outletId}
+          >
+            <span style={{ fontSize: "1.1rem" }}>⚡</span>
+            <span>Fast Captain / Waiter Touch PIN Login</span>
+          </button>
         </div>
       </div>
 

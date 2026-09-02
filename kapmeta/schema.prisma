@@ -1008,10 +1008,13 @@ model ingredients {
 }
 
 model outlet_status {
-  outlet_id  String   @id @db.Uuid
-  is_online  Boolean  @default(true)
-  updated_at DateTime @default(now()) @db.Timestamptz(6)
-  updated_by String?  @db.Uuid
+  outlet_id        String   @id @db.Uuid
+  is_online        Boolean  @default(true)
+  dine_in_active   Boolean  @default(true)
+  delivery_active  Boolean  @default(true)
+  pickup_active    Boolean  @default(true)
+  updated_at       DateTime @default(now()) @db.Timestamptz(6)
+  updated_by       String?  @db.Uuid
 }
 
 model petty_cash_ledger {

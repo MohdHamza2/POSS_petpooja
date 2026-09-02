@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { authedFetch } from "../lib/auth";
+import { useKapmetaSocket } from "../lib/useKapmetaSocket";
 
 interface OnlineOrder {
   id: string;
@@ -29,7 +30,7 @@ export default function AggregatorOrdersView() {
   const fetchOrders = async () => {
     try {
       setLoading(true);
-      let endpoint = "/orders?orderType=AGGREGATOR,DELIVERY";
+      let endpoint = "/orders/live?kind=online";
       if (topTab === "ADVANCE") {
         endpoint = "/orders/advance";
       } else if (topTab === "CURRENT") {
@@ -40,7 +41,11 @@ export default function AggregatorOrdersView() {
       if (res.ok) {
         const data = await res.json();
         const list = data.orders || (Array.isArray(data) ? data : []);
-        const mapped: OnlineOrder[] = list.map((ord: any) => {
+        const scoped =
+          topTab === "CURRENT"
+            ? list.filter((ord: any) => ord.orderType !== "DINE_IN")
+            : list;
+        const mapped: OnlineOrder[] = scoped.map((ord: any) => {
           let status: OnlineOrder["status"] = "PENDING";
           if (ord.status === "CONFIRMED" || ord.status === "ACTIVE" || ord.status === "PREPARING" || ord.status === "IN_PREPARATION" || ord.status === "KOT_CREATED") {
             status = "ACCEPTED";
@@ -54,17 +59,25 @@ export default function AggregatorOrdersView() {
             status = "CANCELLED";
           }
 
+          const orderNum = String(ord.orderNumber || "");
+          const channel: OnlineOrder["channel"] =
+            ord.channel === "SWIGGY" || /^SWIGGY-/i.test(orderNum)
+              ? "SWIGGY"
+              : ord.channel === "ZOMATO" || /^ZOMATO-/i.test(orderNum)
+                ? "ZOMATO"
+                : "DIRECT";
+
           return {
             id: ord.id,
             orderNumber: ord.orderNumber,
             externalOrderId: ord.externalOrderId || ord.orderNumber,
-            channel: (ord.channel as any) || (topTab === "ADVANCE" ? "ADVANCE" : "SWIGGY"),
+            channel,
             status,
-            customerName: ord.customerName || ord.customer?.name || "Customer",
-            customerPhone: ord.customerPhone || ord.customer?.phone || "+91 98765 43210",
-            riderName: ord.riderName || (topTab === "ADVANCE" ? "Scheduled Pickup" : "Delivery Partner"),
-            riderPhone: "+91 91234 56789",
-            grandTotalMinor: Number(ord.grandTotalMinor || ord.grandTotal || 0),
+            customerName: ord.customerName || ord.customer?.name || "Guest",
+            customerPhone: ord.customerPhone || ord.customer?.phone || "",
+            riderName: ord.riderName || "",
+            riderPhone: ord.riderPhone || "",
+            grandTotalMinor: Number(ord.grandTotalMinor ?? ord.grandTotal ?? 0),
             itemCount: ord.itemCount || (ord.orderItems?.length || ord.items?.length || 1),
             createdAt: ord.createdAt || new Date().toISOString(),
             items: (ord.orderItems || ord.items || []).map((it: any) => ({
@@ -75,6 +88,31 @@ export default function AggregatorOrdersView() {
           };
         });
         setOrders(mapped);
+        // #region agent log
+        fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
+          body: JSON.stringify({
+            sessionId: "9c675b",
+            hypothesisId: "AG1",
+            location: "AggregatorOrdersView.tsx:fetchOrders",
+            message: "mapped online/current orders",
+            data: {
+              topTab,
+              count: mapped.length,
+              sample: mapped.slice(0, 5).map((o) => ({
+                n: o.orderNumber,
+                channel: o.channel,
+                status: o.status,
+                customer: o.customerName,
+                grand: o.grandTotalMinor,
+              })),
+            },
+            timestamp: Date.now(),
+            runId: "agg-pre",
+          }),
+        }).catch(() => {});
+        // #endregion
       }
     } catch (e) {
       console.error("Failed to fetch orders:", e);
@@ -88,6 +126,22 @@ export default function AggregatorOrdersView() {
     const interval = setInterval(fetchOrders, 10000);
     return () => clearInterval(interval);
   }, [topTab]);
+
+  useKapmetaSocket(
+    (payload) => {
+      if (
+        payload.topic === "kot.created" ||
+        payload.topic === "kot.status_updated" ||
+        payload.topic === "order.status_updated" ||
+        payload.topic === "order.created" ||
+        payload.topic === "finance.order_settled"
+      ) {
+        fetchOrders();
+      }
+    },
+    true,
+    "aggregator-orders"
+  );
 
   const handleUpdateStatus = async (orderId: string, nextStatus: OnlineOrder["status"]) => {
     setUpdatingId(orderId);
@@ -103,6 +157,9 @@ export default function AggregatorOrdersView() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ toStatus: apiStatus, status: apiStatus }),
       });
+      // #region agent log
+      fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb",{method:"POST",headers:{"Content-Type":"application/json","X-Debug-Session-Id":"9c675b"},body:JSON.stringify({sessionId:"9c675b",hypothesisId:"AGG1",location:"AggregatorOrdersView.tsx:handleUpdateStatus",message:"aggregator status patch",data:{orderId,nextStatus,apiStatus,ok:res.ok,http:res.status},timestamp:Date.now(),runId:"agg-kot-post"})}).catch(()=>{});
+      // #endregion
       if (res.ok) {
         setOrders((prev) =>
           prev.map((o) => (o.id === orderId ? { ...o, status: nextStatus } : o))
@@ -110,6 +167,42 @@ export default function AggregatorOrdersView() {
       }
     } catch (err) {
       console.error(err);
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
+  const handleSettleCash = async (orderId: string, amountMinor: number) => {
+    setUpdatingId(orderId);
+    try {
+      const settleRes = await authedFetch(`/orders/${orderId}/settle`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paymentMethod: "CASH", amountPaidMinor: amountMinor }),
+      });
+      // #region agent log
+      fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
+        body: JSON.stringify({
+          sessionId: "9c675b",
+          hypothesisId: "D",
+          location: "AggregatorOrdersView.tsx:handleSettleCash",
+          message: "CURRENT tab cash settle",
+          data: { orderId, amountMinor, ok: settleRes.ok, status: settleRes.status },
+          timestamp: Date.now(),
+          runId: "modes-lifecycle",
+        }),
+      }).catch(() => {});
+      // #endregion
+      if (!settleRes.ok) {
+        const err = await settleRes.json().catch(() => ({} as { error?: string }));
+        alert(err.error || `Settle failed (${settleRes.status})`);
+        return;
+      }
+      await fetchOrders();
+    } catch (e) {
+      console.error(e);
     } finally {
       setUpdatingId(null);
     }
@@ -356,6 +449,18 @@ export default function AggregatorOrdersView() {
                         onClick={() => handleUpdateStatus(ord.id, "DISPATCHED")}
                       >
                         Dispatch / Handover
+                      </button>
+                    )}
+
+                    {topTab !== "ADVANCE" && (ord.status === "DISPATCHED" || ord.status === "FOOD_READY") && (
+                      <button
+                        type="button"
+                        className="btn-action-dispatch"
+                        style={{ background: "#15803d" }}
+                        disabled={updatingId === ord.id}
+                        onClick={() => handleSettleCash(ord.id, ord.grandTotalMinor)}
+                      >
+                        Settle cash
                       </button>
                     )}
 

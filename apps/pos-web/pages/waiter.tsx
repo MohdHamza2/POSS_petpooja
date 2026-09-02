@@ -13,6 +13,7 @@ import MoveKotModal from "../components/MoveKotModal";
 import AttractiveMenuItemCard, { MenuItemData } from "../components/menu/AttractiveMenuItemCard";
 import MenuCustomizerModal, { CustomizedItemSelection } from "../components/menu/MenuCustomizerModal";
 import { DietaryFilter } from "../components/menu/CategoryNavbar";
+import { channelPausedMessage, opsStatusFromPayload, type OutletOpsStatus } from "../lib/channel-ops";
 
 interface MenuItem {
   id: string;
@@ -282,6 +283,8 @@ export default function WaiterDashboard() {
   const [submittingOrder, setSubmittingOrder] = useState<boolean>(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [orderError, setOrderError] = useState<string | null>(null);
+  const [channelOps, setChannelOps] = useState<OutletOpsStatus | null>(null);
+  const dineInPausedReason = channelPausedMessage(channelOps, "DINE_IN");
 
   // Waiter Personal Shift Stats
   const [showStats, setShowStats] = useState<boolean>(false);
@@ -335,6 +338,17 @@ export default function WaiterDashboard() {
       console.error("Failed to fetch tables", e);
     } finally {
       setLoadingTables(false);
+    }
+  };
+
+  const fetchChannelOps = async () => {
+    try {
+      const res = await authedFetch("/settings/store-status");
+      if (!res.ok) return;
+      const data = await res.json();
+      setChannelOps(opsStatusFromPayload(data));
+    } catch {
+      /* keep last known flags */
     }
   };
 
@@ -428,6 +442,7 @@ export default function WaiterDashboard() {
     setOfflineQueue(loadOfflineQueue());
     if (authLoading) return;
     fetchTables();
+    fetchChannelOps();
     fetchMenu();
     fetchKots();
     heartbeat();
@@ -467,6 +482,10 @@ export default function WaiterDashboard() {
 
   useKapmetaSocket(
     (payload) => {
+      if (payload.topic === "outlet.store_status_updated") {
+        setChannelOps(opsStatusFromPayload(payload.data));
+        return;
+      }
       const status = payload.data?.status;
       const stage = payload.data?.stage;
       const servedIds = [
@@ -600,6 +619,13 @@ export default function WaiterDashboard() {
   // omit to fire the whole cart at once.
   const submitOrder = async (courseFilter?: Course) => {
     if (!activeTable) return;
+    if (dineInPausedReason) {
+      setOrderError(dineInPausedReason);
+      // #region agent log
+      fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'CH5',location:'waiter.tsx:submitOrder',message:'waiter blocked by dine-in pause',data:{table:activeTable.tableNumber,reason:dineInPausedReason},timestamp:Date.now(),runId:'channel-pause'})}).catch(()=>{});
+      // #endregion
+      return;
+    }
     const firing = courseFilter ? cart.filter((ci) => ci.course === courseFilter) : cart;
     if (firing.length === 0) return;
     setSubmittingOrder(true);
@@ -705,7 +731,13 @@ export default function WaiterDashboard() {
 
   const serveTable = async (table: DiningTable) => {
     try {
+      // #region agent log
+      fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'S1',location:'waiter.tsx:serveTable',message:'waiter Serve click',data:{tableId:table.id,tableNumber:table.tableNumber,kitchenStage:table.kitchenStage||null,status:table.status},timestamp:Date.now(),runId:'waiter-serve'})}).catch(()=>{});
+      // #endregion
       const res = await authedFetch(`/tables/${table.id}/serve`, { method: "POST" });
+      // #region agent log
+      fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'S1',location:'waiter.tsx:serveTable',message:'waiter Serve response',data:{ok:res.ok,status:res.status,tableId:table.id},timestamp:Date.now(),runId:'waiter-serve'})}).catch(()=>{});
+      // #endregion
       if (res.ok) {
         fetchTables();
         fetchKots();
@@ -719,6 +751,7 @@ export default function WaiterDashboard() {
       }
     } catch (e) {
       console.error("Failed to serve table", e);
+      showPickupNotification("Serve failed — check kitchen tickets");
     }
   };
 
@@ -773,6 +806,10 @@ export default function WaiterDashboard() {
   // courseFilter fires only that course's lines — used for course-wise firing.
   const submitAddItems = async (courseFilter?: Course) => {
     if (!manageOrder) return;
+    if (dineInPausedReason) {
+      setOrderError(dineInPausedReason);
+      return;
+    }
     const firing = courseFilter ? cart.filter((ci) => ci.course === courseFilter) : cart;
     if (firing.length === 0) return;
     setSubmittingOrder(true);
@@ -1013,6 +1050,9 @@ export default function WaiterDashboard() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ amountMinor, method: paymentMethod, seatNumber }),
       });
+      // #region agent log
+      fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'P',location:'waiter.tsx:submitPayment',message:'payment POST result',data:{ok:res.ok,status:res.status,amountMinor,orderId:bill.orderId},timestamp:Date.now(),runId:'t05-settle'})}).catch(()=>{});
+      // #endregion
       if (res.ok) {
         const refreshed = await authedFetch(`/orders/${bill.orderId}/bill`);
         if (refreshed.ok) {
@@ -1051,6 +1091,15 @@ export default function WaiterDashboard() {
         }
         if (splitBySeat) await loadSeatBills();
         showPickupNotification("Payment recorded!");
+      } else {
+        const errData = await res.json().catch(() => ({} as { error?: string }));
+        const raw = typeof errData.error === "string" ? errData.error : `Payment failed (${res.status})`;
+        const isPartition = /no partition of relation/i.test(raw) || /audit_logs/i.test(raw);
+        showPickupNotification(
+          isPartition
+            ? "Payment blocked: audit log month partition missing — run db migrate"
+            : raw.slice(0, 180)
+        );
       }
     } catch (e) {
       console.error("Payment failed", e);
@@ -1594,6 +1643,9 @@ export default function WaiterDashboard() {
                   <div>
                     <h1 className="text-xl font-bold tracking-tight">Floor Map</h1>
                     <p className="text-xs text-slate-400 mt-1">Tap a table to log an order or manage table state</p>
+                    {dineInPausedReason && (
+                      <p role="status" className="text-xs font-bold text-rose-400 mt-2">{dineInPausedReason}</p>
+                    )}
                   </div>
                   <div className="flex items-center gap-3">
                     <button
@@ -1750,12 +1802,18 @@ export default function WaiterDashboard() {
                             {table.status === "VACANT" && !transferFromTable && (
                               <button
                                 onClick={() => {
+                                  if (dineInPausedReason) {
+                                    setOrderError(dineInPausedReason);
+                                    showPickupNotification(dineInPausedReason);
+                                    return;
+                                  }
                                   setActiveTable(table);
                                   setCoversCount(table.capacity || 2);
                                   setManageOrder(null);
                                   setCart([]);
                                 }}
-                                className="new-order-btn w-full bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg py-1.5 text-xs font-semibold transition-all"
+                                disabled={Boolean(dineInPausedReason)}
+                                className="new-order-btn w-full bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:hover:bg-emerald-600 text-white rounded-lg py-1.5 text-xs font-semibold transition-all"
                               >
                                 + New Order
                               </button>
@@ -1764,7 +1822,11 @@ export default function WaiterDashboard() {
                               <>
                                 {table.kitchenStage === "READY" && (
                                   <button
-                                    onClick={() => serveTable(table)}
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      serveTable(table);
+                                    }}
                                     className="w-full bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg py-1.5 text-xs font-semibold transition-all"
                                   >
                                     Serve
@@ -2247,6 +2309,7 @@ export default function WaiterDashboard() {
       <CaptainPinLoginModal
         isOpen={isPinLoginModalOpen}
         onClose={() => setIsPinLoginModalOpen(false)}
+        outletId={me?.outletId}
         onSuccess={(user) => {
           alert(`Welcome back, ${user.name}! Shift active.`);
           window.location.reload();

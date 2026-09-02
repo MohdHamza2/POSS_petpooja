@@ -92,8 +92,8 @@ export interface BillSummary {
 export const TERMINAL_ORDER_STATUSES: OrderStatus[] = ["COMPLETED", "CANCELLED", "FAILED"];
 
 export interface ListOrdersFilter {
-  // "live" = non-terminal statuses (Live Orders tab). "online" = orderType
-  // AGGREGATOR (Online Orders tab). "all" = no status/type narrowing, but
+  // "live" = non-terminal statuses (Live Orders tab). "online" = DELIVERY
+  // (Direct plus aggregator-numbered). "all" = no status/type narrowing, but
   // fromDate/toDate still apply (All Orders tab date range).
   view?: "live" | "online" | "all";
   status?: OrderStatus;

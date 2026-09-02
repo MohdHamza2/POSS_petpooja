@@ -12,7 +12,7 @@ type LiveSubTab = "orders" | "tables";
 
 const RUNNING_ORDER_ROWS: { type: string; label: string }[] = [
   { type: "DINE_IN", label: "Dine in" },
-  { type: "TAKEAWAY", label: "Takeaway" },
+  { type: "PICKUP", label: "Takeaway" },
   { type: "DELIVERY", label: "Delivery" },
 ];
 
@@ -40,14 +40,26 @@ interface RevenueTrendPointDto {
   grandTotalMinor: string;
 }
 
-const ORDER_TYPE_OPTIONS = ["DINE_IN", "TAKEAWAY", "DELIVERY", "AGGREGATOR"];
+const ORDER_TYPE_OPTIONS = ["DINE_IN", "PICKUP", "DELIVERY"];
 const ORDER_TYPE_LABELS: Record<string, string> = {
   DINE_IN: "Dine-In",
   TAKEAWAY: "Takeaway",
+  PICKUP: "Takeaway",
   DELIVERY: "Delivery",
-  AGGREGATOR: "Aggregator",
 };
 const PAGE_SIZE = 10;
+
+function businessDateIso(): string {
+  const now = new Date();
+  const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 5, 0, 0, 0);
+  const d = now < startToday
+    ? new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
+    : now;
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
 
 const CHANNEL_COLORS: Record<string, { bg: string; text: string }> = {
   SWIGGY: { bg: "#fff4e8", text: "#fc8019" },
@@ -91,7 +103,7 @@ function formatMoney(minor: string): string {
 const TABS: { key: Tab; label: string }[] = [
   { key: "live", label: "🔴 Live Orders" },
   { key: "all", label: "📋 All Orders" },
-  { key: "online", label: "🌐 Online Orders (Swiggy / Zomato)" },
+  { key: "online", label: "🌐 Online / Delivery" },
 ];
 
 export default function OrdersPage() {
@@ -107,8 +119,8 @@ export default function OrdersPage() {
   const [orders, setOrders] = useState<OrderSummaryDto[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [fromDate, setFromDate] = useState("");
-  const [toDate, setToDate] = useState("");
+  const [fromDate, setFromDate] = useState(businessDateIso);
+  const [toDate, setToDate] = useState(businessDateIso);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<OrderDetailDto | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -130,8 +142,8 @@ export default function OrdersPage() {
     const params = new URLSearchParams();
     params.set("view", tab);
     if (tab === "all") {
-      if (fromDate) params.set("fromDate", new Date(fromDate).toISOString());
-      if (toDate) params.set("toDate", new Date(toDate).toISOString());
+      if (fromDate) params.set("fromDate", fromDate);
+      if (toDate) params.set("toDate", toDate);
       if (orderTypeFilter) params.set("orderType", orderTypeFilter);
       if (orderIdSearch.trim()) params.set("orderId", orderIdSearch.trim());
       params.set("limit", String(PAGE_SIZE));
@@ -188,10 +200,11 @@ export default function OrdersPage() {
 
   useEffect(() => {
     if (authLoading) return;
+    if (tab === "online") return;
     fetchOrders();
     const interval = setInterval(fetchOrders, 15000);
     return () => clearInterval(interval);
-  }, [authLoading, fetchOrders]);
+  }, [authLoading, fetchOrders, tab]);
 
   useEffect(() => {
     if (authLoading || tab !== "all") return;
@@ -270,6 +283,42 @@ export default function OrdersPage() {
               ↻ Refresh
             </button>
           </div>
+
+          {tab === "all" && (
+            <div className="orders-filter-row">
+              <select
+                value={orderTypeFilter}
+                onChange={(e) => setOrderTypeFilter(e.target.value)}
+                aria-label="Filter by order type"
+              >
+                <option value="">All types</option>
+                {ORDER_TYPE_OPTIONS.map((t) => (
+                  <option key={t} value={t}>
+                    {ORDER_TYPE_LABELS[t] || t}
+                  </option>
+                ))}
+              </select>
+              <input
+                type="date"
+                value={fromDate}
+                onChange={(e) => setFromDate(e.target.value)}
+                aria-label="From date"
+              />
+              <input
+                type="date"
+                value={toDate}
+                onChange={(e) => setToDate(e.target.value)}
+                aria-label="To date"
+              />
+              <input
+                type="search"
+                value={orderIdSearch}
+                onChange={(e) => setOrderIdSearch(e.target.value)}
+                placeholder="Order #"
+                aria-label="Search order number"
+              />
+            </div>
+          )}
 
           {loadError && <div className="error-banner">{loadError}</div>}
 
@@ -371,6 +420,23 @@ export default function OrdersPage() {
               </tbody>
             </table>
           </div>
+          {tab === "all" && totalPages > 1 && (
+            <div className="orders-pager">
+              <button type="button" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>
+                Previous
+              </button>
+              <span>
+                Page {page} of {totalPages} ({totalCount} orders)
+              </span>
+              <button
+                type="button"
+                disabled={page >= totalPages}
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              >
+                Next
+              </button>
+            </div>
+          )}
         </div>
       )}
 
@@ -390,6 +456,39 @@ export default function OrdersPage() {
           align-items: center;
           justify-content: space-between;
           margin-bottom: 16px;
+        }
+        .orders-filter-row {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          margin-bottom: 12px;
+        }
+        .orders-filter-row select,
+        .orders-filter-row input {
+          border: 1px solid #cbd5e1;
+          border-radius: 6px;
+          padding: 8px 10px;
+          font-size: 0.8125rem;
+        }
+        .orders-pager {
+          display: flex;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 12px;
+          margin-top: 12px;
+          font-size: 0.8125rem;
+          color: #475569;
+        }
+        .orders-pager button {
+          background: #ffffff;
+          border: 1px solid #cbd5e1;
+          padding: 6px 12px;
+          border-radius: 6px;
+          cursor: pointer;
+        }
+        .orders-pager button:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
         }
         .tab-pill-group {
           display: flex;

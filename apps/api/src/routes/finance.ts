@@ -11,6 +11,7 @@ import {
 import type { RefundStatus } from "@kapmeta/shared-types/finance";
 import { writeAuditLog } from "@kapmeta/shared-types/audit-log";
 import { settleOrderCommand } from "../orchestration/settle-order";
+import { outletBusinessDayWindow } from "../outlet-business-day";
 
 export const financeRouter = Router();
 const zReportGenerator = new ZReportGenerator(prisma);
@@ -67,11 +68,15 @@ financeRouter.post("/settle", requireAuth, requirePermission("bill.settle"), asy
 
 // Z-Report
 financeRouter.get("/z-report", requireAuth, requirePermission("report.read"), async (req: AuthedRequest, res) => {
-  const dateParam = req.query.date as string;
-  const date = dateParam ? new Date(dateParam) : new Date();
+  const dateParam = req.query.date as string | undefined;
+  const window = await outletBusinessDayWindow(req.auth!.outletId, dateParam || null);
+  const date = new Date(window.businessDate + "T00:00:00");
   
   try {
-    const report = await zReportGenerator.generateDailyReport(req.auth!.outletId, date);
+    const report = await zReportGenerator.generateDailyReport(req.auth!.outletId, window.businessDate);
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'Z1',location:'finance.ts:GET /z-report',message:'z-report window vs picker',data:{dateParam:dateParam||null,parsedDate:date.toISOString(),reportDate:report.date,businessDayStart:report.businessDayStart,businessDayEnd:report.businessDayEnd,invoiceCount:report.invoiceCount,grandTotal:report.grandTotal.toString(),paymentModeKeys:Object.keys(report.paymentModes||{}),tzOffsetMin:new Date().getTimezoneOffset()},timestamp:Date.now(),runId:'post-fix'})}).catch(()=>{});
+    // #endregion
     
     // convert bigints
     const paymentModesStr: Record<string, string> = {};
@@ -287,13 +292,11 @@ financeRouter.get("/refunds", requireAuth, requirePermission("report.read"), asy
 financeRouter.get("/cash-drawer", requireAuth, requirePermission("report.read"), async (req: AuthedRequest, res) => {
   try {
     const outletId = req.auth!.outletId;
-    const dateParam = req.query.date as string;
-    const date = dateParam ? new Date(dateParam) : new Date();
-
-    const startOfDay = new Date(date);
-    startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay = new Date(date);
-    endOfDay.setHours(23, 59, 59, 999);
+    const dateParam = req.query.date as string | undefined;
+    const { start: startOfDay, end: endOfDay, businessDate: localDateStr } = await outletBusinessDayWindow(
+      outletId,
+      dateParam || null,
+    );
 
     // 1. Query Cash Payments for the day
     const cashPayments = await prisma.payment.findMany({
@@ -303,7 +306,7 @@ financeRouter.get("/cash-drawer", requireAuth, requirePermission("report.read"),
         status: "CAPTURED",
         createdAt: {
           gte: startOfDay,
-          lte: endOfDay,
+          lt: endOfDay,
         },
       },
     });
@@ -315,7 +318,7 @@ financeRouter.get("/cash-drawer", requireAuth, requirePermission("report.read"),
         outlet_id: outletId,
         created_at: {
           gte: startOfDay,
-          lte: endOfDay,
+          lt: endOfDay,
         },
       },
     });
@@ -329,7 +332,7 @@ financeRouter.get("/cash-drawer", requireAuth, requirePermission("report.read"),
     const ledgerRows = await prisma.petty_cash_ledger.findMany({
       where: {
         outlet_id: outletId,
-        created_at: { gte: startOfDay, lte: endOfDay },
+        created_at: { gte: startOfDay, lt: endOfDay },
       },
       orderBy: { created_at: "desc" },
     });
@@ -359,13 +362,8 @@ financeRouter.get("/cash-drawer", requireAuth, requirePermission("report.read"),
     const expectedCashMinor =
       openingFloatMinor + cashSalesMinor - cashRefundsMinor - pettyCashTotalMinor;
     // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'G',location:'finance.ts:cash-drawer-get',message:'cash drawer expected from ledger',data:{sessionStatus:session?.status||'NONE',opening:openingFloatMinor.toString(),cashSales:cashSalesMinor.toString(),petty:pettyCashTotalMinor.toString(),expected:expectedCashMinor.toString(),sessionExpected:session?session.expected_close_balance_minor.toString():null,cashTxCount:cashPayments.length},timestamp:Date.now(),runId:'post-fix'})}).catch(()=>{});
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'Z3',location:'finance.ts:cash-drawer-get',message:'cash drawer expected from ledger',data:{sessionStatus:session?.status||'NONE',opening:openingFloatMinor.toString(),cashSales:cashSalesMinor.toString(),petty:pettyCashTotalMinor.toString(),expected:expectedCashMinor.toString(),sessionExpected:session?session.expected_close_balance_minor.toString():null,cashTxCount:cashPayments.length,windowStart:startOfDay.toISOString(),windowEnd:endOfDay.toISOString(),dateParam:dateParam||null,businessDate:localDateStr},timestamp:Date.now(),runId:'post-fix'})}).catch(()=>{});
     // #endregion
-
-    // Local calendar date of the queried day. Using startOfDay.toISOString()
-    // rolls back one day in positive-UTC-offset timezones (local midnight ->
-    // previous UTC evening), so format the local Y-M-D components instead.
-    const localDateStr = `${startOfDay.getFullYear()}-${String(startOfDay.getMonth() + 1).padStart(2, "0")}-${String(startOfDay.getDate()).padStart(2, "0")}`;
 
     res.status(200).json({
       outletId,
@@ -436,6 +434,17 @@ financeRouter.post("/petty-cash", requireAuth, requirePermission("report.read"),
     }
 
     const user = await prisma.user.findUnique({ where: { id: userId } });
+    import("../websockets").then(({ broadcast }) => {
+      broadcast("finance.petty_cash", {
+        outletId,
+        sessionId: session?.id || null,
+        amountMinor: String(amount),
+        category: row.category,
+      });
+    }).catch(() => {});
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'P1',location:'finance.ts:POST petty-cash',message:'petty cash recorded and broadcast',data:{amountMinor:String(amount),category:row.category,hasOpenSession:Boolean(session)},timestamp:Date.now(),runId:'petty-shift'})}).catch(()=>{});
+    // #endregion
     res.status(201).json({
       id: row.id,
       amountMinor: String(amount),
@@ -461,16 +470,13 @@ financeRouter.post("/cash-drawer/open", requireAuth, requirePermission("report.r
       return res.status(409).json({ error: "A cash drawer session is already open", sessionId: existing.id });
     }
     const opening = BigInt(req.body.openingFloatMinor ?? req.body.opening_balance_minor ?? 0);
-    const startOfDay = new Date();
-    startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay = new Date();
-    endOfDay.setHours(23, 59, 59, 999);
+    const { start: startOfDay, end: endOfDay } = await outletBusinessDayWindow(outletId);
     const cashToday = await prisma.payment.findMany({
-      where: { outletId, method: "CASH", status: "CAPTURED", createdAt: { gte: startOfDay, lte: endOfDay } },
+      where: { outletId, method: "CASH", status: "CAPTURED", createdAt: { gte: startOfDay, lt: endOfDay } },
     });
     const cashSalesMinor = cashToday.reduce((sum, p) => sum + p.amount, 0n);
     const pettyToday = await prisma.petty_cash_ledger.aggregate({
-      where: { outlet_id: outletId, created_at: { gte: startOfDay, lte: endOfDay } },
+      where: { outlet_id: outletId, created_at: { gte: startOfDay, lt: endOfDay } },
       _sum: { amount_minor: true },
     });
     const petty = pettyToday._sum.amount_minor ?? 0n;
@@ -515,16 +521,13 @@ const handleReconcileShift = async (req: AuthedRequest, res: any) => {
     }
 
     const actualCounted = BigInt(counted);
-    const startOfDay = new Date();
-    startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay = new Date();
-    endOfDay.setHours(23, 59, 59, 999);
+    const { start: startOfDay, end: endOfDay } = await outletBusinessDayWindow(outletId);
     const cashToday = await prisma.payment.findMany({
-      where: { outletId, method: "CASH", status: "CAPTURED", createdAt: { gte: startOfDay, lte: endOfDay } },
+      where: { outletId, method: "CASH", status: "CAPTURED", createdAt: { gte: startOfDay, lt: endOfDay } },
     });
     const cashSalesMinor = cashToday.reduce((sum, p) => sum + p.amount, 0n);
     const pettyToday = await prisma.petty_cash_ledger.aggregate({
-      where: { outlet_id: outletId, created_at: { gte: startOfDay, lte: endOfDay } },
+      where: { outlet_id: outletId, created_at: { gte: startOfDay, lt: endOfDay } },
       _sum: { amount_minor: true },
     });
     const expectedCashMinor =

@@ -18,6 +18,7 @@ interface UserApi {
   lastName: string;
   phone: string | null;
   isActive: boolean;
+  hasPin?: boolean;
   userRoles: UserRoleApi[];
 }
 
@@ -487,6 +488,7 @@ export default function UserManagement() {
                               {user.firstName} {user.lastName}
                             </strong>
                             {!user.isActive && <div className="inactive-tag">Inactive</div>}
+                            {user.hasPin ? <div className="inactive-tag" style={{ color: "#047857" }}>PIN set</div> : <div className="inactive-tag">No PIN</div>}
                           </td>
                           <td>{user.email}</td>
                           <td>

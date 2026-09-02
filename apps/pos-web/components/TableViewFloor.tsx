@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from "react";
 import { useRouter } from "next/router";
 import { authedFetch } from "../lib/auth";
 import { useKapmetaSocket } from "../lib/useKapmetaSocket";
+import { channelPausedMessage, opsStatusFromPayload, type OutletOpsStatus } from "../lib/channel-ops";
 import MoveKotModal from "./MoveKotModal";
 import AddTableModal from "./AddTableModal";
 
@@ -43,6 +44,9 @@ export default function TableViewFloor({
   const [inspectTable, setInspectTable] = useState<TableItem | null>(null);
   const [inspectOrderDetails, setInspectOrderDetails] = useState<any | null>(null);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
+  const [channelOps, setChannelOps] = useState<OutletOpsStatus | null>(null);
+  const deliveryPaused = Boolean(channelPausedMessage(channelOps, "DELIVERY"));
+  const pickupPaused = Boolean(channelPausedMessage(channelOps, "PICKUP"));
 
   const fetchTablesData = async () => {
     try {
@@ -136,12 +140,22 @@ export default function TableViewFloor({
     }
   };
 
-  useKapmetaSocket(() => {
+  useKapmetaSocket((payload) => {
+    if (payload.topic === "outlet.store_status_updated") {
+      setChannelOps(opsStatusFromPayload(payload.data));
+      return;
+    }
     fetchTablesData();
   }, true, "pos-floor");
 
   useEffect(() => {
     fetchTablesData();
+    authedFetch("/settings/store-status")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data) setChannelOps(opsStatusFromPayload(data));
+      })
+      .catch(() => {});
     const timer = setInterval(fetchTablesData, 10000);
     return () => {
       clearInterval(timer);
@@ -229,12 +243,20 @@ export default function TableViewFloor({
       return;
     }
     // Trigger thermal print job
-    authedFetch(`/orders/${tbl.activeOrderId}/print`, { method: "POST" })
-      .then((res) => {
-        if (res.ok) alert(`KOT/Bill sent to Thermal Printer for Table ${tbl.tableNumber}`);
-        else alert(`Print command sent.`);
+    authedFetch(`/orders/${tbl.activeOrderId}/print`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ document_type: "bill" }),
+    })
+      .then(async (res) => {
+        if (res.ok) {
+          alert(`KOT/Bill sent for Table ${tbl.tableNumber}`);
+          return;
+        }
+        const err = await res.json().catch(() => ({} as { error?: string }));
+        alert(err.error || `Print failed (${res.status})`);
       })
-      .catch(() => alert("Printing..."));
+      .catch(() => alert("Print failed. Check printer and try again."));
   };
 
   // Group tables by section
@@ -342,7 +364,10 @@ export default function TableViewFloor({
           <button
             type="button"
             className="btn-delivery-jump"
+            disabled={deliveryPaused}
+            title={deliveryPaused ? channelPausedMessage(channelOps, "DELIVERY") || "Delivery is paused" : undefined}
             onClick={() => {
+              if (deliveryPaused) return;
               if (onNavigateDelivery) onNavigateDelivery();
               else router.push("/orders?tab=online");
             }}
@@ -353,7 +378,10 @@ export default function TableViewFloor({
           <button
             type="button"
             className="btn-pickup-jump"
+            disabled={pickupPaused}
+            title={pickupPaused ? channelPausedMessage(channelOps, "PICKUP") || "Pickup is paused" : undefined}
             onClick={() => {
+              if (pickupPaused) return;
               if (onNavigatePickup) onNavigatePickup();
               else router.push("/?mode=PICKUP");
             }}
@@ -458,6 +486,21 @@ export default function TableViewFloor({
                           <span className="blank-amount"></span>
                         )}
                       </div>
+
+                      {isOccupied && (tbl.status === "PRINTED" || tbl.status === "PAID") && (
+                        <div style={{ margin: "2px 0 4px 0", textAlign: "center", display: "flex", justifyContent: "center", gap: 4, flexWrap: "wrap" }}>
+                          {tbl.status === "PRINTED" && (
+                            <span style={{ fontSize: "10px", background: "rgba(168, 85, 247, 0.2)", color: "#c4b5fd", border: "1px solid rgba(168, 85, 247, 0.5)", borderRadius: "4px", padding: "1px 6px", fontWeight: 700 }}>
+                              Printed
+                            </span>
+                          )}
+                          {tbl.status === "PAID" && (
+                            <span style={{ fontSize: "10px", background: "rgba(16, 185, 129, 0.2)", color: "#34d399", border: "1px solid rgba(16, 185, 129, 0.5)", borderRadius: "4px", padding: "1px 6px", fontWeight: 700 }}>
+                              Paid
+                            </span>
+                          )}
+                        </div>
+                      )}
 
                       {isOccupied && tbl.kitchenStage && (
                         <div style={{ margin: "2px 0 4px 0", textAlign: "center", display: "flex", justifyContent: "center" }}>

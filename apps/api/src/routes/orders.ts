@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import { Router } from "express";
 import { requireAuth, checkPermissionDirect, type AuthedRequest } from "../middleware/require-auth";
 import { prisma } from "../prisma";
@@ -12,10 +13,13 @@ import {
   PrismaModifierPriceLookup,
 } from "@kapmeta/orders";
 import type { OrderStatus, CreateOrderInput } from "@kapmeta/shared-types/orders";
-import { onOrderConfirmed, onItemsAdded } from "../orchestration/order-lifecycle";
+import { onOrderConfirmed, onItemsAdded, stepOrderTo, cascadeKotTicketsTo } from "../orchestration/order-lifecycle";
 import { settleOrderCommand } from "../orchestration/settle-order";
 import { TaxEngine } from "@kapmeta/finance";
 import { dissolveMergeGroupForTable, expandMergeMemberIds, findLiveOrdersOnTables, occupyMergeMembers, resolveAnchorTable, stampOrderMergeLabel } from "../orchestration/table-merge";
+import { outletBusinessDayWindow } from "../outlet-business-day";
+import { channelPausedReason, loadOutletOpsStatus, normalizeOpsOrderType } from "../outlet-channel-status";
+import { writeAuditLog } from "@kapmeta/shared-types/audit-log";
 
 const orderRepo = new PrismaOrderRepository(prisma);
 const menuPriceLookup = new PrismaMenuPriceLookup(prisma);
@@ -27,18 +31,44 @@ export const ordersRouter = Router();
 ordersRouter.get("/orders", requireAuth, async (req: AuthedRequest, res) => {
   try {
     const outletId = req.auth!.outletId;
-    const { status, channel, orderType, page, limit, fromDate, toDate } = req.query;
+    const { status, channel, orderType, page, limit, offset, fromDate, toDate, view, orderId } = req.query;
 
     const filter: any = {};
+    const viewKey = String(view || "");
+    if (viewKey === "live" || viewKey === "online" || viewKey === "all") filter.view = viewKey;
     if (status) filter.status = status as OrderStatus;
     if (channel) filter.channel = channel as any;
     if (orderType) filter.orderType = orderType as any;
-    if (page) filter.page = Number(page);
     if (limit) filter.limit = Number(limit);
+    if (offset != null && offset !== "") filter.offset = Number(offset);
+    else if (page) filter.offset = Math.max(0, (Number(page) - 1) * Number(limit || 50));
+    if (orderId) filter.orderNumberSearch = String(orderId);
+
     if (fromDate) filter.fromDate = new Date(String(fromDate));
     if (toDate) filter.toDate = new Date(String(toDate));
+    let defaultedWindow = false;
+    const fromStamp = String(fromDate || "");
+    const toStamp = String(toDate || "");
+    const dayOnly = /^\d{4}-\d{2}-\d{2}$/;
+    if (dayOnly.test(fromStamp)) {
+      const startW = await outletBusinessDayWindow(outletId, fromStamp);
+      filter.fromDate = startW.start;
+      const endW = await outletBusinessDayWindow(outletId, dayOnly.test(toStamp) ? toStamp : fromStamp);
+      filter.toDate = endW.end;
+    } else if (!fromDate && !toDate && !orderId && (viewKey === "" || viewKey === "all")) {
+      const day = await outletBusinessDayWindow(outletId);
+      filter.fromDate = day.start;
+      filter.toDate = day.end;
+      defaultedWindow = true;
+    }
 
     const orders = await listOrders(outletId, filter, orderRepo);
+    const total = await orderRepo.countOrders(outletId, filter);
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'L1',location:'orders.ts:GET /orders',message:'list orders window',data:{view:viewKey||null,orderType:filter.orderType||null,defaultedWindow,from:filter.fromDate?filter.fromDate.toISOString():null,to:filter.toDate?filter.toDate.toISOString():null,count:Array.isArray(orders)?orders.length:null,total,sample:(Array.isArray(orders)?orders:[]).slice(0,3).map((o:any)=>({n:o.orderNumber,s:o.status,t:o.orderType,c:o.createdAt}))},timestamp:Date.now(),runId:'leftover-post'})}).catch(()=>{});
+    // #endregion
+    res.setHeader("X-Total-Count", String(total));
+    res.setHeader("Access-Control-Expose-Headers", "X-Total-Count");
     res.status(200).json(orders);
   } catch (err) {
     console.error("Error listing orders:", err);
@@ -50,6 +80,7 @@ ordersRouter.get("/orders", requireAuth, async (req: AuthedRequest, res) => {
 ordersRouter.post("/orders", requireAuth, async (req: AuthedRequest, res) => {
   try {
     const outletId = req.auth!.outletId;
+    const userId = req.auth!.userId;
     const body = req.body;
 
     // Normalize lines
@@ -72,9 +103,24 @@ ordersRouter.post("/orders", requireAuth, async (req: AuthedRequest, res) => {
       return res.status(400).json({ error: "Order must have at least one line item" });
     }
 
-    // Auto-resolve diningTableId if tableNumber is provided but diningTableId is missing
-    let diningTableId = body.diningTableId || undefined;
-    if (!diningTableId && body.tableNumber) {
+    const requestedType = normalizeOpsOrderType(body.orderType);
+    const isAdvance = Boolean(body.scheduledFireAt);
+    const isHold = body.action === "HOLD";
+    const ops = await loadOutletOpsStatus(outletId);
+    const paused = channelPausedReason(ops, requestedType);
+    if (paused) {
+      // #region agent log
+      fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'CH1',location:'orders.ts:POST /orders',message:'channel pause blocked create',data:{requestedType,paused,isHold,isOnline:ops.isOnline,dineInActive:ops.dineInActive,deliveryActive:ops.deliveryActive,pickupActive:ops.pickupActive},timestamp:Date.now(),runId:'channel-pause'})}).catch(()=>{});
+      // #endregion
+      return res.status(409).json({ error: paused, code: "CHANNEL_PAUSED" });
+    }
+    const isOffFloor = requestedType === "DELIVERY" || requestedType === "PICKUP" || isAdvance;
+    const reservedLabels = new Set(["DELIVERY", "PICKUP", "TAKEAWAY", "DIRECT", "ONLINE", "ADVANCE"]);
+
+    // Auto-resolve diningTableId only for dine-in covers. Delivery / pickup / advance
+    // must never attach to or occupy a dining table.
+    let diningTableId = isOffFloor ? undefined : (body.diningTableId || undefined);
+    if (!isOffFloor && !diningTableId && body.tableNumber && !reservedLabels.has(String(body.tableNumber).toUpperCase())) {
       const table = await prisma.diningTable.findFirst({
         where: {
           outletId,
@@ -95,9 +141,11 @@ ordersRouter.post("/orders", requireAuth, async (req: AuthedRequest, res) => {
       }
     }
 
-    const isHold = body.action === "HOLD";
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'D1',location:'orders.ts:POST /orders',message:'mode vs table bind',data:{requestedType,isOffFloor,isAdvance,isHold,hasTableId:Boolean(diningTableId),tableNumber:body.tableNumber||null},timestamp:Date.now(),runId:'modes'})}).catch(()=>{});
+    // #endregion
 
-    if (diningTableId && !isHold) {
+    if (diningTableId && !isHold && !isOffFloor) {
       const liveOnAnchor = await findLiveOrdersOnTables(prisma, outletId, [diningTableId]);
       const existingLive = liveOnAnchor[0];
       if (existingLive) {
@@ -133,7 +181,7 @@ ordersRouter.post("/orders", requireAuth, async (req: AuthedRequest, res) => {
       }
     }
 
-    const orderType = (body.orderType === "TAKEAWAY" || body.orderType === "PICKUP") ? "PICKUP" : (body.orderType === "DELIVERY" ? "DELIVERY" : "DINE_IN");
+    const orderType = requestedType;
     const idempotencyKey = body.idempotencyKey || `ord_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 
     const input: CreateOrderInput = {
@@ -149,15 +197,16 @@ ordersRouter.post("/orders", requireAuth, async (req: AuthedRequest, res) => {
 
     const result = await createOrder(input, menuPriceLookup, orderRepo, modifierPriceLookup);
 
-    if (diningTableId || body.tableNumber) {
-      await prisma.order.update({
-        where: { id: result.id },
-        data: {
-          diningTableId: diningTableId || undefined,
-          table_number: body.tableNumber ? String(body.tableNumber) : undefined,
-        },
-      }).catch(() => {});
-    }
+    await prisma.order.update({
+      where: { id: result.id },
+      data: {
+        diningTableId: isOffFloor ? null : diningTableId || undefined,
+        table_number: isOffFloor
+          ? requestedType
+          : (body.tableNumber ? String(body.tableNumber) : undefined),
+        created_by: body.waiterId || userId,
+      },
+    }).catch(() => {});
 
     if (body.scheduledFireAt) {
       await prisma.order.update({
@@ -192,7 +241,7 @@ ordersRouter.post("/orders", requireAuth, async (req: AuthedRequest, res) => {
         await onOrderConfirmed(result.id, prisma);
       }
 
-      if (diningTableId) {
+      if (diningTableId && !isOffFloor) {
         await occupyMergeMembers(prisma, outletId, diningTableId);
         await stampOrderMergeLabel(prisma, outletId, result.id, diningTableId);
       }
@@ -202,6 +251,9 @@ ordersRouter.post("/orders", requireAuth, async (req: AuthedRequest, res) => {
     }
     // If Bill / Immediate Settlement requested (action: "BILL" or isPaid: true or status: "COMPLETED"):
     else if (body.action === "BILL" || body.isPaid || body.status === "COMPLETED") {
+      // #region agent log
+      fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb",{method:"POST",headers:{"Content-Type":"application/json","X-Debug-Session-Id":"9c675b"},body:JSON.stringify({sessionId:"9c675b",hypothesisId:"DUE2",location:"orders.ts:POST BILL",message:"create-and-settle BILL branch",data:{action:body.action||null,isPaid:body.isPaid===true,paymentMethod:body.paymentMethod||null,orderId:result.id},timestamp:Date.now(),runId:"due-print"})}).catch(()=>{});
+      // #endregion
       await transitionOrder(result.id, "CONFIRMED", orderRepo, req.auth!.userId);
       await onOrderConfirmed(result.id, prisma);
       const billed = await settleOrderCommand(prisma, {
@@ -230,15 +282,17 @@ ordersRouter.post("/orders", requireAuth, async (req: AuthedRequest, res) => {
         status: orderDetail?.status || result.status,
       });
       if (!isHold) {
-        broadcast("kot.created", { orderId: result.id, diningTableId });
-        const occupyIds = createMembers.length > 0 ? createMembers : (diningTableId ? [diningTableId] : []);
-        for (const id of occupyIds) {
-          broadcast("table.status_updated", {
-            tableId: id,
-            orderId: result.id,
-            status: body.action === "BILL" ? "AVAILABLE" : "OCCUPIED",
-            stage: body.action === "KOT" ? "QUEUED" : undefined,
-          });
+        broadcast("kot.created", { orderId: result.id, diningTableId: isOffFloor ? null : diningTableId });
+        if (!isOffFloor) {
+          const occupyIds = createMembers.length > 0 ? createMembers : (diningTableId ? [diningTableId] : []);
+          for (const id of occupyIds) {
+            broadcast("table.status_updated", {
+              tableId: id,
+              orderId: result.id,
+              status: body.action === "BILL" ? "AVAILABLE" : "OCCUPIED",
+              stage: body.action === "KOT" ? "QUEUED" : undefined,
+            });
+          }
         }
       }
     }).catch(() => {});
@@ -272,10 +326,8 @@ ordersRouter.get("/orders/advance", requireAuth, async (req: AuthedRequest, res)
     const advanceOrders = await prisma.order.findMany({
       where: {
         outletId,
-        OR: [
-          { scheduledFireAt: { not: null } },
-          { advanceStatus: { not: null } },
-        ],
+        advanceStatus: "SCHEDULED",
+        status: { notIn: ["COMPLETED", "CANCELLED"] },
       },
       include: {
         orderItems: true,
@@ -295,11 +347,31 @@ ordersRouter.get("/orders/advance", requireAuth, async (req: AuthedRequest, res)
 ordersRouter.get("/orders/live", requireAuth, async (req: AuthedRequest, res) => {
   try {
     const outletId = req.auth!.outletId;
+    const { start: dayStart } = await outletBusinessDayWindow(outletId);
+    const overnightCookCutoff = new Date(dayStart.getTime() - 24 * 60 * 60 * 1000);
+    const cookingStatuses = ["DRAFT", "PLACED", "CONFIRMED", "KOT_CREATED", "IN_PREPARATION", "READY"];
     const activeOrders = await prisma.order.findMany({
       where: {
         outletId,
+        orderType: { in: ["DELIVERY", "PICKUP"] },
         status: { in: ["DRAFT", "PLACED", "CONFIRMED", "KOT_CREATED", "IN_PREPARATION", "READY", "SERVED", "HANDED_OVER", "OUT_FOR_DELIVERY"] },
-        NOT: { advanceStatus: "HELD" },
+        OR: [
+          { advanceStatus: null },
+          { advanceStatus: { notIn: ["HELD", "SCHEDULED"] } },
+        ],
+        AND: [
+          {
+            OR: [
+              { createdAt: { gte: dayStart } },
+              {
+                AND: [
+                  { createdAt: { gte: overnightCookCutoff } },
+                  { status: { in: cookingStatuses } },
+                ],
+              },
+            ],
+          },
+        ],
       },
       include: {
         orderItems: true,
@@ -307,8 +379,38 @@ ordersRouter.get("/orders/live", requireAuth, async (req: AuthedRequest, res) =>
       },
       orderBy: { createdAt: "desc" },
     });
+    const kind = String(req.query.kind || "");
+    const scoped =
+      kind === "online"
+        ? activeOrders.filter((o) => o.orderType === "DELIVERY")
+        : activeOrders;
+    const customerIds = [...new Set(scoped.map((o) => o.customerId).filter((id): id is string => Boolean(id)))];
+    const customers = customerIds.length
+      ? await prisma.customer.findMany({
+          where: { id: { in: customerIds } },
+          select: { id: true, name: true, firstName: true, lastName: true, phone: true },
+        })
+      : [];
+    const customerById = new Map(customers.map((c) => [c.id, c]));
+    const payload = scoped.map((o) => {
+      const c = o.customerId ? customerById.get(o.customerId) : undefined;
+      const channel = /^(SWIGGY)-/i.test(o.orderNumber || "")
+        ? "SWIGGY"
+        : /^(ZOMATO)-/i.test(o.orderNumber || "")
+          ? "ZOMATO"
+          : "DIRECT";
+      return Object.assign(o, {
+        channel,
+        customerName: c ? (c.name || `${c.firstName || ""} ${c.lastName || ""}`.trim() || "Guest") : null,
+        customerPhone: c?.phone || null,
+        table_number: o.table_number || (o.orderType === "DELIVERY" ? "DELIVERY" : o.orderType === "PICKUP" ? "PICKUP" : o.table_number),
+      });
+    });
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'L2',location:'orders.ts:GET /live',message:'live off-floor scoped to business day',data:{count:scoped.length,rawCount:activeOrders.length,kind:kind||'all',deliveryCount:scoped.filter((o)=>o.orderType==='DELIVERY').length,directDelivery:scoped.filter((o)=>o.orderType==='DELIVERY'&&!/^(SWIGGY|ZOMATO)-/i.test(o.orderNumber||'')).map((o)=>o.orderNumber),dayStart:dayStart.toISOString(),sample:scoped.slice(0,5).map((o)=>({n:o.orderNumber,status:o.status,type:o.orderType,createdAt:o.createdAt.toISOString()}))},timestamp:Date.now(),runId:'leftover-post'})}).catch(()=>{});
+    // #endregion
 
-    res.status(200).json(activeOrders);
+    res.status(200).json(payload);
   } catch (err) {
     console.error("Error fetching live orders:", err);
     res.status(500).json({ error: "Failed to fetch live orders" });
@@ -440,37 +542,45 @@ ordersRouter.patch("/orders/:id/status", requireAuth, async (req: AuthedRequest,
   try {
     const userId = req.auth!.userId;
     const targetStatus = (req.body.toStatus || req.body.status) as OrderStatus;
-    const { reasonCode, approverUserId } = req.body;
 
     if (!targetStatus) {
       return res.status(400).json({ error: "status or toStatus is required" });
     }
 
     const orderId = req.params.id;
-    const order = await prisma.order.findUnique({ where: { id: orderId } });
+    const outletId = req.auth!.outletId;
+    const order = await prisma.order.findFirst({ where: { id: orderId, outletId } });
     if (!order) {
       return res.status(404).json({ error: "Order not found" });
     }
 
-    // Auto-progress prerequisite steps if skipping
-    const cur = order.status;
-    if (cur === "PLACED" && (targetStatus === "IN_PREPARATION" || (targetStatus as any) === "PREPARING" || targetStatus === "READY")) {
-      await transitionOrder(orderId, "CONFIRMED", orderRepo, userId).catch(() => {});
-      await transitionOrder(orderId, "KOT_CREATED", orderRepo, userId).catch(() => {});
+    const mappedTarget = (targetStatus === ("PREPARING" as any) ? "IN_PREPARATION" : targetStatus) as OrderStatus;
+    const permAction = mappedTarget === "CANCELLED" ? "order.void" : "order.create";
+    const perm = await checkPermissionDirect(userId, outletId, permAction);
+    if (!perm.allowed) {
+      return res.status(403).json({ error: perm.reason || "not allowed to update order status" });
     }
-
-    const mappedTarget = targetStatus === ("PREPARING" as any) ? "IN_PREPARATION" : targetStatus;
-    const result = await transitionOrder(
-      orderId,
-      mappedTarget as OrderStatus,
-      orderRepo,
-      userId,
-      reasonCode,
-      approverUserId
-    );
+    const stepResult = await stepOrderTo(prisma, orderId, mappedTarget, userId);
+    if (!stepResult.ok) {
+      return res.status(409).json({
+        error: "illegal transition",
+        from: stepResult.from,
+        to: mappedTarget,
+        applied: stepResult.applied,
+      });
+    }
 
     if (mappedTarget === "CONFIRMED" || mappedTarget === "KOT_CREATED") {
       await onOrderConfirmed(orderId, prisma).catch(() => {});
+    }
+
+    let kotCascade: { ticketIds: string[]; from: string[]; target: string } | null = null;
+    if (mappedTarget === "READY") {
+      kotCascade = await cascadeKotTicketsTo(prisma, orderId, "READY", userId);
+    } else if (mappedTarget === "HANDED_OVER" || mappedTarget === "OUT_FOR_DELIVERY") {
+      kotCascade = await cascadeKotTicketsTo(prisma, orderId, "SERVED", userId);
+    } else if (mappedTarget === "CANCELLED") {
+      kotCascade = await cascadeKotTicketsTo(prisma, orderId, "CANCELLED", userId);
     }
 
     if (mappedTarget === "COMPLETED") {
@@ -479,7 +589,20 @@ ordersRouter.patch("/orders/:id/status", requireAuth, async (req: AuthedRequest,
       }
     }
 
-    res.status(200).json(result);
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'S3',location:'orders.ts:PATCH /orders/:id/status',message:'order status kot cascade',data:{orderId,authOutletId:outletId,orderOutletMatch:order.outletId===outletId,from:order.status,mappedTarget,permAction,stepOk:stepResult.ok,applied:stepResult.applied,kotTarget:kotCascade&&kotCascade.target,kotCount:kotCascade?kotCascade.ticketIds.length:0},timestamp:Date.now(),runId:'sec-auth'})}).catch(()=>{});
+    // #endregion
+
+    import("../websockets").then(({ broadcast }) => {
+      broadcast("order.status_updated", { orderId, status: mappedTarget, tableId: order.diningTableId });
+      if (kotCascade) {
+        for (const kotTicketId of kotCascade.ticketIds) {
+          broadcast("kot.status_updated", { kotTicketId, orderId, status: kotCascade.target });
+        }
+      }
+    }).catch(() => {});
+
+    res.status(200).json({ ok: stepResult.ok, from: stepResult.from, applied: stepResult.applied, kotCascade });
   } catch (err: any) {
     console.error("Error updating order status:", err);
     res.status(400).json({ error: err.message || "Failed to transition order status" });
@@ -551,6 +674,9 @@ const handleRecordPayment = async (req: AuthedRequest, res: any) => {
     });
   } catch (err: any) {
     console.error("Error recording payment:", err);
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'P',location:'orders.ts:handleRecordPayment:catch',message:'POST /payments failed',data:{orderId:req.params.id,code:err?.code||null,partition:typeof err?.message==='string'&&err.message.includes('no partition'),msg:String(err?.message||'').slice(0,180)},timestamp:Date.now(),runId:'t05-settle'})}).catch(()=>{});
+    // #endregion
     res.status(400).json({ error: err.message || "Failed to record payment" });
   }
 };
@@ -568,6 +694,20 @@ ordersRouter.post("/orders/:id/items", requireAuth, async (req: AuthedRequest, r
       return res.status(400).json({ error: "lines must be a non-empty array" });
     }
 
+    const existing = await prisma.order.findFirst({
+      where: { id: req.params.id, outletId },
+      select: { orderType: true },
+    });
+    if (!existing) return res.status(404).json({ error: "Order not found" });
+    const itemOps = await loadOutletOpsStatus(outletId);
+    const itemPaused = channelPausedReason(itemOps, normalizeOpsOrderType(existing.orderType));
+    if (itemPaused) {
+      // #region agent log
+      fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'CH3',location:'orders.ts:POST /orders/:id/items',message:'channel pause blocked add items',data:{orderId:req.params.id,orderType:existing.orderType,paused:itemPaused},timestamp:Date.now(),runId:'channel-pause'})}).catch(()=>{});
+      // #endregion
+      return res.status(409).json({ error: itemPaused, code: "CHANNEL_PAUSED" });
+    }
+
     const added = await addOrderItems(
       outletId,
       req.params.id,
@@ -580,18 +720,19 @@ ordersRouter.post("/orders/:id/items", requireAuth, async (req: AuthedRequest, r
     await onItemsAdded(req.params.id, prisma).catch(() => {});
     const live = await prisma.order.findFirst({
       where: { id: req.params.id, outletId },
-      select: { id: true, diningTableId: true, table_number: true },
+      select: { id: true, diningTableId: true, table_number: true, orderType: true },
     });
-    if (live?.diningTableId) {
+    const bindsTable = live?.orderType === "DINE_IN" && Boolean(live?.diningTableId);
+    if (bindsTable && live?.diningTableId) {
       await occupyMergeMembers(prisma, outletId, live.diningTableId);
       await stampOrderMergeLabel(prisma, outletId, live.id, live.diningTableId);
     }
-    const itemMembers = live?.diningTableId
+    const itemMembers = bindsTable && live?.diningTableId
       ? await expandMergeMemberIds(prisma, outletId, [live.diningTableId])
       : [];
     import("../websockets").then(({ broadcast }) => {
-      broadcast("order.updated", { orderId: req.params.id, diningTableId: live?.diningTableId || null });
-      broadcast("kot.created", { orderId: req.params.id, diningTableId: live?.diningTableId || null });
+      broadcast("order.updated", { orderId: req.params.id, diningTableId: bindsTable ? live?.diningTableId || null : null });
+      broadcast("kot.created", { orderId: req.params.id, diningTableId: bindsTable ? live?.diningTableId || null : null });
       for (const id of itemMembers) {
         broadcast("table.status_updated", { tableId: id, orderId: req.params.id, status: "OCCUPIED" });
       }
@@ -676,7 +817,7 @@ ordersRouter.post("/orders/:id/settle", requireAuth, async (req: AuthedRequest, 
       customerId: req.body.customerId,
     });
     // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'A',location:'orders.ts:POST /settle',message:'settle response',data:{orderId:req.params.id,alreadySettled:result.alreadySettled,status:result.status,invoiceNumber:result.invoiceNumber,invoiceNumbers:result.invoiceNumbers},timestamp:Date.now(),runId:'split-post'})}).catch(()=>{});
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'DUE1',location:'orders.ts:POST /settle',message:'settle response',data:{orderId:req.params.id,alreadySettled:result.alreadySettled,status:result.status,paymentMethod:req.body.paymentMethod||null,invoiceNumber:result.invoiceNumber,invoiceNumbers:result.invoiceNumbers},timestamp:Date.now(),runId:'due-print'})}).catch(()=>{});
     // #endregion
     res.status(200).json(result);
   } catch (err: any) {
@@ -720,6 +861,14 @@ ordersRouter.post("/orders/:id/fire-advance", requireAuth, async (req: AuthedReq
       where: { id: orderId, outletId },
     });
     if (!existing) return res.status(404).json({ error: "Order not found" });
+    const fireOps = await loadOutletOpsStatus(outletId);
+    const firePaused = channelPausedReason(fireOps, normalizeOpsOrderType(existing.orderType));
+    if (firePaused) {
+      // #region agent log
+      fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'CH2',location:'orders.ts:fire-advance',message:'channel pause blocked fire-advance',data:{orderId,orderType:existing.orderType,paused:firePaused},timestamp:Date.now(),runId:'channel-pause'})}).catch(()=>{});
+      // #endregion
+      return res.status(409).json({ error: firePaused, code: "CHANNEL_PAUSED" });
+    }
     await prisma.order.update({
       where: { id: orderId },
       data: { advanceStatus: "FIRED" },
@@ -727,10 +876,9 @@ ordersRouter.post("/orders/:id/fire-advance", requireAuth, async (req: AuthedReq
     await transitionOrder(orderId, "CONFIRMED", orderRepo, req.auth!.userId).catch(() => {});
     await transitionOrder(orderId, "KOT_CREATED", orderRepo, req.auth!.userId).catch(() => {});
     await onOrderConfirmed(orderId, prisma);
-    if (existing.diningTableId) {
-      await occupyMergeMembers(prisma, outletId, existing.diningTableId);
-      await stampOrderMergeLabel(prisma, outletId, orderId, existing.diningTableId);
-    }
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'D1',location:'orders.ts:fire-advance',message:'advance fired without occupying table',data:{orderId,orderType:existing.orderType,diningTableId:existing.diningTableId||null,occupied:false},timestamp:Date.now(),runId:'modes'})}).catch(()=>{});
+    // #endregion
 
     res.status(200).json({ ok: true, orderId, status: "KOT_CREATED" });
   } catch (err: any) {
@@ -845,5 +993,77 @@ ordersRouter.get("/orders/:id/bill/by-seat", requireAuth, async (req: AuthedRequ
   } catch (err: any) {
     console.error("Error generating seat bill:", err);
     res.status(500).json({ error: err.message || "Failed to generate seat bill" });
+  }
+});
+
+// POST /orders/:id/print - accept bill/KOT print job (floor thermal icon).
+// No printer hardware in this API process: job is accepted, settings-aware
+// copy is returned, order FSM is not moved to a non-existent PRINTED status.
+ordersRouter.post("/orders/:id/print", requireAuth, async (req: AuthedRequest, res) => {
+  try {
+    const outletId = req.auth!.outletId;
+    const orderId = req.params.id;
+    const documentType = String(req.body?.document_type || req.body?.documentType || "bill").toLowerCase();
+    if (documentType !== "bill" && documentType !== "kot") {
+      return res.status(400).json({ error: "document_type must be bill or kot" });
+    }
+
+    const order = await prisma.order.findFirst({
+      where: { id: orderId, outletId },
+      include: { orderItems: true },
+    });
+    if (!order) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    const printSettings = await prisma.$queryRawUnsafe<Array<{ printer_name: string | null; kot_copies: number | null; bill_copies: number | null }>>(
+      `SELECT printer_name, kot_copies, bill_copies FROM outlet_print_settings WHERE outlet_id = $1 LIMIT 1`,
+      outletId
+    ).catch(() => [] as Array<{ printer_name: string | null; kot_copies: number | null; bill_copies: number | null }>);
+
+    const settings = printSettings[0] || null;
+    const copies = documentType === "kot" ? Number(settings?.kot_copies || 1) : Number(settings?.bill_copies || 1);
+    const printJobId = randomUUID();
+
+    if (documentType === "bill") {
+      await writeAuditLog(prisma, {
+        outletId,
+        userId: req.auth!.userId,
+        action: "BILL_PRINT",
+        entityType: "ORDER",
+        entityId: orderId,
+        afterState: { documentType, printJobId, orderStatus: order.status },
+      });
+    }
+
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'L4',location:'orders.ts:POST /orders/:id/print',message:'print job accepted',data:{orderId,documentType,orderStatus:order.status,copies,auditWritten:documentType==='bill',hasPrinterName:Boolean(settings&&settings.printer_name),itemCount:order.orderItems.length},timestamp:Date.now(),runId:'leftover-post'})}).catch(()=>{});
+    // #endregion
+
+    import("../websockets").then(({ broadcast }) => {
+      broadcast("order.print_requested", {
+        orderId,
+        documentType,
+        tableId: order.diningTableId,
+        tableNumber: order.table_number,
+        printJobId,
+      });
+    }).catch(() => {});
+
+    res.status(200).json({
+      ok: true,
+      print_job_id: printJobId,
+      document_type: documentType,
+      copies,
+      order: {
+        id: order.id,
+        orderNumber: order.orderNumber,
+        status: order.status,
+        tableNumber: order.table_number,
+      },
+    });
+  } catch (err: any) {
+    console.error("Error accepting print job:", err);
+    res.status(500).json({ error: err.message || "Failed to print" });
   }
 });

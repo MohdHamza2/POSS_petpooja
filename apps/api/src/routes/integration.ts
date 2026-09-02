@@ -2,6 +2,7 @@ import { Router } from "express";
 import { requireAuth, requirePermission, AuthedRequest } from "../middleware/require-auth";
 import { prisma } from "../prisma";
 import { encryptCredential, maskCredential } from "@kapmeta/integration";
+import { channelPausedReason, loadOutletOpsStatus } from "../outlet-channel-status";
 
 const router = Router();
 
@@ -11,6 +12,43 @@ function extractInclusiveTaxMinor(subtotalMinor: bigint, taxRatePercent: number)
   if (subtotalMinor <= 0n || !Number.isFinite(rate) || rate <= 0) return 0n;
   const taxRateBasisPoints = BigInt(Math.round(rate * 100));
   return subtotalMinor - (subtotalMinor * 10000n) / (10000n + taxRateBasisPoints);
+}
+
+async function resolveWebhookCustomer(outletId: string, customer: { name?: string; phone?: string } | null | undefined): Promise<string | null> {
+  const phone = String(customer?.phone || "").replace(/\s+/g, "").trim();
+  const name = String(customer?.name || "").trim();
+  if (phone.length < 8) return null;
+  const outlet = await prisma.outlet.findUnique({
+    where: { id: outletId },
+    select: { organizationId: true },
+  });
+  const organizationId = outlet?.organizationId || null;
+  const existing = await prisma.customer.findFirst({
+    where: organizationId
+      ? { organization_id: organizationId, phone }
+      : { outletId, phone },
+  });
+  if (existing) return existing.id;
+  const parts = (name || "Guest").split(/\s+/).filter(Boolean);
+  const created = await prisma.customer.create({
+    data: {
+      organization_id: organizationId || undefined,
+      outletId,
+      phone,
+      firstName: parts[0] || "Guest",
+      lastName: parts.slice(1).join(" ") || undefined,
+      name: name || parts[0] || "Guest",
+      isActive: true,
+    },
+  });
+  await (prisma as any).loyalty_accounts.create({
+    data: {
+      customer_id: created.id,
+      balance: 0,
+      tier: "SILVER",
+    },
+  }).catch(() => {});
+  return created.id;
 }
 
 // =====================================
@@ -323,13 +361,14 @@ router.post(["/webhooks/:channel", "/webhooks/swiggy", "/webhooks/zomato"], asyn
 
     const outletId = targetOutlet.id;
 
-    const storeStatus = await prisma.outlet_status.findUnique({ where: { outlet_id: outletId } });
-    const paused = storeStatus && storeStatus.is_online === false;
+    const ops = await loadOutletOpsStatus(outletId);
+    const pausedReason = channelPausedReason(ops, "DELIVERY");
+    const paused = Boolean(pausedReason);
     // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'B',location:'integration.ts:webhook-pause',message:'aggregator ingest pause check',data:{outletId,hasStatusRow:Boolean(storeStatus),isOnline:storeStatus?storeStatus.is_online:null,blocked:Boolean(paused),externalOrderId},timestamp:Date.now(),runId:'pause-pre'})}).catch(()=>{});
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'CH1',location:'integration.ts:webhook-pause',message:'aggregator ingest pause check',data:{outletId,isOnline:ops.isOnline,deliveryActive:ops.deliveryActive,blocked:paused,reason:pausedReason,externalOrderId},timestamp:Date.now(),runId:'channel-pause'})}).catch(()=>{});
     // #endregion
     if (paused) {
-      res.status(409).json({ error: "Store is paused; aggregator orders are not accepted" });
+      res.status(409).json({ error: pausedReason, code: "CHANNEL_PAUSED" });
       return;
     }
 
@@ -376,6 +415,8 @@ router.post(["/webhooks/:channel", "/webhooks/swiggy", "/webhooks/zomato"], asyn
     // #endregion
     const today = new Date();
     today.setHours(0, 0, 0, 0);
+    const customerId = await resolveWebhookCustomer(outletId, customer);
+    const tableNumber = "DELIVERY";
 
     // 4. Create Order & OrderItems
     const createdOrder = await prisma.order.create({
@@ -388,6 +429,9 @@ router.post(["/webhooks/:channel", "/webhooks/swiggy", "/webhooks/zomato"], asyn
         subtotal,
         taxTotal: tax,
         grandTotal,
+        diningTableId: null,
+        table_number: tableNumber,
+        customerId: customerId || undefined,
         orderItems: {
           create: lines.map((l) => ({
             outletId,
@@ -400,6 +444,9 @@ router.post(["/webhooks/:channel", "/webhooks/swiggy", "/webhooks/zomato"], asyn
         },
       },
     });
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'AG3',location:'integration.ts:webhook-create',message:'aggregator order bound without table',data:{orderId:createdOrder.id,orderNumber:createdOrder.orderNumber,diningTableId:createdOrder.diningTableId,tableNumber:createdOrder.table_number,customerId:createdOrder.customerId,channel:channelParam},timestamp:Date.now(),runId:'agg-post'})}).catch(()=>{});
+    // #endregion
 
     // 5. Generate Station KOTs & Order Status History
     await (prisma.orderStatusHistory as any).create({
@@ -409,7 +456,8 @@ router.post(["/webhooks/:channel", "/webhooks/swiggy", "/webhooks/zomato"], asyn
       },
     }).catch(() => {});
 
-    const { onOrderConfirmed } = await import("../orchestration/order-lifecycle");
+    const { onOrderConfirmed, stepOrderTo } = await import("../orchestration/order-lifecycle");
+    await stepOrderTo(prisma, createdOrder.id, "KOT_CREATED", outletId);
     await onOrderConfirmed(createdOrder.id, prisma).catch(() => {});
 
     // 6. Record Immutable Webhook Audit Log

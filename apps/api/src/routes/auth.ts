@@ -29,6 +29,21 @@ const FAILURE_STATUS: Record<LoginFailure["reason"], number> = {
 
 const router = Router();
 
+const PIN_MAX_FAILURES = 5;
+const PIN_LOCK_MS = 15 * 60 * 1000;
+const pinFailures = new Map<string, { count: number; lockedUntil: number }>();
+
+function pinAttemptKey(req: { ip?: string; socket?: { remoteAddress?: string } }, userId: string): string {
+  const ip = req.ip || req.socket?.remoteAddress || "unknown";
+  return `${ip}:${userId}`;
+}
+
+function pinLockRemainingMs(key: string): number {
+  const row = pinFailures.get(key);
+  if (!row) return 0;
+  return Math.max(0, row.lockedUntil - Date.now());
+}
+
 router.post("/login", async (req, res) => {
   try {
     const { email, password, outletId } = req.body;
@@ -86,6 +101,13 @@ router.post("/pin-login", async (req, res) => {
       return;
     }
 
+    const attemptKey = pinAttemptKey(req, userId || email || "unknown");
+    const lockMs = pinLockRemainingMs(attemptKey);
+    if (lockMs > 0) {
+      res.status(429).json({ error: "PIN_LOCKED", retryAfterMs: lockMs });
+      return;
+    }
+
     let user = null;
     if (userId) {
       user = await prisma.user.findUnique({ where: { id: userId } });
@@ -94,6 +116,10 @@ router.post("/pin-login", async (req, res) => {
     }
 
     if (!user) {
+      const fail = pinFailures.get(attemptKey) || { count: 0, lockedUntil: 0 };
+      fail.count += 1;
+      if (fail.count >= PIN_MAX_FAILURES) fail.lockedUntil = Date.now() + PIN_LOCK_MS;
+      pinFailures.set(attemptKey, fail);
       res.status(401).json({ error: "INVALID_CREDENTIALS" });
       return;
     }
@@ -110,9 +136,14 @@ router.post("/pin-login", async (req, res) => {
 
     const isValidPin = await verifyPassword(pin, user.pinHash);
     if (!isValidPin) {
+      const fail = pinFailures.get(attemptKey) || { count: 0, lockedUntil: 0 };
+      fail.count += 1;
+      if (fail.count >= PIN_MAX_FAILURES) fail.lockedUntil = Date.now() + PIN_LOCK_MS;
+      pinFailures.set(attemptKey, fail);
       res.status(401).json({ error: "INVALID_CREDENTIALS" });
       return;
     }
+    pinFailures.delete(attemptKey);
 
     // Verify outlet access
     const grant = await prisma.userRole.findFirst({
@@ -150,6 +181,21 @@ router.post("/pin-login", async (req, res) => {
         outletId,
       },
     });
+    // #region agent log
+    fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
+      body: JSON.stringify({
+        sessionId: "9c675b",
+        hypothesisId: "PIN-B",
+        location: "auth.ts:POST /pin-login",
+        message: "pin login issued tokens",
+        data: { userId: user.id, outletId, hasRefresh: Boolean(refreshToken) },
+        timestamp: Date.now(),
+        runId: "pin-staff",
+      }),
+    }).catch(() => {});
+    // #endregion
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "internal error" });
@@ -235,6 +281,122 @@ router.get("/outlets/mine", requireAuth, async (req: AuthedRequest, res) => {
         code: outlet.code,
       }))
     );
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "internal error" });
+  }
+});
+
+// GET /auth/outlets — resolve one active outlet by code for the login picker.
+router.get("/outlets", async (req, res) => {
+  try {
+    const code = typeof req.query.code === "string" ? req.query.code.trim() : "";
+    if (!code) {
+      // #region agent log
+      fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
+        body: JSON.stringify({
+          sessionId: "9c675b",
+          hypothesisId: "S1",
+          location: "auth.ts:GET /outlets",
+          message: "public outlet directory rejected without code",
+          data: { hasCode: false, count: 0 },
+          timestamp: Date.now(),
+          runId: "sec-auth",
+        }),
+      }).catch(() => {});
+      // #endregion
+      res.status(400).json({ error: "outlet code is required" });
+      return;
+    }
+
+    const outlets = await prisma.outlet.findMany({
+      where: { isActive: true, code: { equals: code, mode: "insensitive" } },
+      orderBy: { name: "asc" },
+      select: { id: true, name: true, code: true },
+    });
+    // #region agent log
+    fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
+      body: JSON.stringify({
+        sessionId: "9c675b",
+        hypothesisId: "S1",
+        location: "auth.ts:GET /outlets",
+        message: "public outlet lookup by code",
+        data: { hasCode: true, count: outlets.length, codes: outlets.map((o) => o.code) },
+        timestamp: Date.now(),
+        runId: "sec-auth",
+      }),
+    }).catch(() => {});
+    // #endregion
+    res.status(200).json(outlets);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "internal error" });
+  }
+});
+
+// GET /auth/pin-staff — PIN-enabled staff for an outlet. Names/roles only.
+router.get("/pin-staff", async (req, res) => {
+  try {
+    const outletId = typeof req.query.outletId === "string" ? req.query.outletId : "";
+    if (!outletId) {
+      res.status(400).json({ error: "outletId is required" });
+      return;
+    }
+
+    const users = await prisma.user.findMany({
+      where: {
+        isActive: true,
+        pinHash: { not: null },
+        userRoles: {
+          some: {
+            OR: [{ outletId }, { outletId: null }],
+          },
+        },
+      },
+      orderBy: [{ firstName: "asc" }, { lastName: "asc" }],
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        userRoles: {
+          where: { OR: [{ outletId }, { outletId: null }] },
+          include: { role: true },
+        },
+      },
+    });
+
+    const staff = users.map((user) => ({
+      id: user.id,
+      name: `${user.firstName ?? ""} ${user.lastName ?? ""}`.trim() || "Staff",
+      role: user.userRoles[0]?.role?.name ?? "Staff",
+    }));
+
+    // #region agent log
+    fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
+      body: JSON.stringify({
+        sessionId: "9c675b",
+        hypothesisId: "S2",
+        location: "auth.ts:GET /pin-staff",
+        message: "pin-enabled staff from DB",
+        data: {
+          outletId,
+          count: staff.length,
+          fields: staff[0] ? Object.keys(staff[0]) : [],
+          hasEmail: staff.some((s) => "email" in s),
+        },
+        timestamp: Date.now(),
+        runId: "pin-staff",
+      }),
+    }).catch(() => {});
+    // #endregion
+
+    res.status(200).json(staff);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "internal error" });

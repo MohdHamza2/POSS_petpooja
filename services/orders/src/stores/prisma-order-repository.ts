@@ -56,6 +56,15 @@ const VALID_ORDER_STATUSES = new Set([
   "ASSIGNED", "OUT_FOR_DELIVERY", "SERVED", "HANDED_OVER", "COMPLETED", "CANCELLED", "FAILED"
 ]);
 
+/** Map POS/UI aliases onto Prisma `order_type` (DINE_IN | PICKUP | DELIVERY). */
+function mapStoredOrderType(raw: string): "DINE_IN" | "PICKUP" | "DELIVERY" | null {
+  const t = raw.trim().toUpperCase();
+  if (t === "TAKEAWAY") return "PICKUP";
+  if (t === "AGGREGATOR") return "DELIVERY";
+  if (t === "DINE_IN" || t === "PICKUP" || t === "DELIVERY") return t;
+  return null;
+}
+
 export class PrismaOrderRepository implements OrderRepository {
   constructor(private readonly prisma: PrismaClient) {}
 
@@ -104,6 +113,7 @@ export class PrismaOrderRepository implements OrderRepository {
           grandTotal: priced.grandTotalMinor,
           customerId: input.customerId || null,
           diningTableId: input.diningTableId || null,
+          created_by: input.waiterId || null,
         },
       });
 
@@ -201,7 +211,9 @@ export class PrismaOrderRepository implements OrderRepository {
     if (filter.view === "live") {
       where.status = { notIn: TERMINAL_ORDER_STATUSES };
     } else if (filter.view === "online") {
-      where.orderType = "AGGREGATOR";
+      // Prisma order_type has no AGGREGATOR. Online list is live-or-settled DELIVERY
+      // (Swiggy/Zomato prefix plus Direct delivery).
+      where.orderType = "DELIVERY";
     }
 
     if (filter.status) {
@@ -229,13 +241,14 @@ export class PrismaOrderRepository implements OrderRepository {
       }
     }
     if (filter.orderType) {
-      const validTypes = new Set(["DINE_IN", "TAKEAWAY", "DELIVERY", "PICKUP", "DRIVE_THRU", "ROOM_SERVICE", "CATERING", "CURBSIDE"]);
       const rawTypes = typeof filter.orderType === "string" ? filter.orderType.split(",") : [String(filter.orderType)];
-      const filtered = rawTypes.map((t) => t.trim().toUpperCase()).filter((t) => validTypes.has(t));
+      const filtered = rawTypes
+        .map((t) => mapStoredOrderType(t))
+        .filter((t): t is "DINE_IN" | "PICKUP" | "DELIVERY" => t !== null);
       if (filtered.length === 1) {
         where.orderType = filtered[0];
       } else if (filtered.length > 1) {
-        where.orderType = { in: filtered };
+        where.orderType = { in: Array.from(new Set(filtered)) };
       }
     }
     if (filter.orderNumberSearch) {

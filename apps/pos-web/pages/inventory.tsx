@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from "react";
 import Head from "next/head";
 import Link from "next/link";
 import { authedFetch, useAuthGuard } from "../lib/auth";
+import { useKapmetaSocket } from "../lib/useKapmetaSocket";
 import Nav from "../components/Nav";
 
 interface ItemAvailability {
@@ -239,6 +240,18 @@ export default function InventoryDashboard() {
     fetchRecipes();
     fetchVendorsAndPOs();
   }, [authLoading]);
+
+  useKapmetaSocket(
+    (payload) => {
+      if (payload.topic === "inventory.stock_updated" || payload.topic === "finance.order_settled") {
+        fetchIngredients();
+        fetchAvailability();
+        fetchVendorsAndPOs();
+      }
+    },
+    !authLoading,
+    "inventory"
+  );
 
   const categories = useMemo(() => {
     const set = new Set(items.map((i) => i.category));

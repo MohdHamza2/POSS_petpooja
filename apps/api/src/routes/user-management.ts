@@ -43,6 +43,7 @@ router.get(
           lastName: user.lastName,
           phone: user.phone,
           isActive: user.isActive,
+          hasPin: Boolean(user.pinHash),
           userRoles: user.userRoles.map((ur) => ({
             roleId: ur.roleId,
             roleName: ur.role.name,
@@ -580,7 +581,23 @@ router.patch(
         firstName: updatedUser.firstName,
         lastName: updatedUser.lastName,
         isActive: updatedUser.isActive,
+        hasPin: Boolean(updatedUser.pinHash),
       });
+      // #region agent log
+      fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
+        body: JSON.stringify({
+          sessionId: "9c675b",
+          hypothesisId: "PIN-E",
+          location: "user-management.ts:PATCH /users/:id",
+          message: "staff pin flag after update",
+          data: { userId: updatedUser.id, pinTouched: pin !== undefined, hasPin: Boolean(updatedUser.pinHash) },
+          timestamp: Date.now(),
+          runId: "pin-e2e",
+        }),
+      }).catch(() => {});
+      // #endregion
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "internal error" });

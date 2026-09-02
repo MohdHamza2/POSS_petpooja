@@ -3,26 +3,21 @@ import { TERMINAL_ORDER_STATUSES } from "@kapmeta/orders";
 import { requireAuth, requirePermission, type AuthedRequest } from "../middleware/require-auth";
 import { writeAuditLog } from "@kapmeta/shared-types/audit-log";
 import { prisma } from "../prisma";
+import { outletBusinessDayWindow } from "../outlet-business-day";
 const router = Router();
 
 async function waiterBusinessDayStart(outletId: string): Promise<Date> {
-  const outlet = await prisma.outlet.findUnique({
-    where: { id: outletId },
-    select: { dayStartTime: true },
-  });
-  const now = new Date();
-  const start = new Date(now);
-  const src = outlet?.dayStartTime as Date | string | null | undefined;
-  if (src instanceof Date) {
-    start.setHours(src.getUTCHours(), src.getUTCMinutes(), 0, 0);
-  } else if (typeof src === "string" && src.includes(":")) {
-    const [h, m] = src.split(":").map(Number);
-    start.setHours(h || 5, m || 0, 0, 0);
-  } else {
-    start.setHours(5, 0, 0, 0);
-  }
-  if (now < start) start.setDate(start.getDate() - 1);
-  return start;
+  const window = await outletBusinessDayWindow(outletId);
+  return window.start;
+}
+
+/** Covers opened today plus overnight tickets that settle on this business day. */
+function waiterShiftOrderWhere(outletId: string, userId: string, dayStart: Date) {
+  return {
+    outletId,
+    created_by: userId,
+    OR: [{ createdAt: { gte: dayStart } }, { settledAt: { gte: dayStart } }],
+  };
 }
 
 // Called periodically by the waiter app while a waiter is on the floor —
@@ -93,12 +88,12 @@ router.get("/waiters/me/stats", requireAuth, async (req: AuthedRequest, res) => 
     const dayStart = await waiterBusinessDayStart(req.auth!.outletId);
 
     const orders = await prisma.order.findMany({
-      where: {
-        outletId: req.auth!.outletId,
-        createdAt: { gte: dayStart },
-        created_by: req.auth!.userId,
-      },
+      where: waiterShiftOrderWhere(req.auth!.outletId, req.auth!.userId, dayStart),
     });
+
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'W1',location:'waiters.ts:GET me/stats',message:'waiter stats window',data:{dayStart:dayStart.toISOString(),orderCount:orders.length,completed:orders.filter((o)=>o.status==='COMPLETED').length,numbers:orders.map((o)=>o.orderNumber),createdAt:orders.map((o)=>o.createdAt.toISOString()),settledAt:orders.map((o)=>o.settledAt&&o.settledAt.toISOString())},timestamp:Date.now(),runId:'post-fix'})}).catch(()=>{});
+    // #endregion
 
     const tablesServed = new Set(orders.map((o) => o.diningTableId).filter(Boolean)).size;
     const completedOrders = orders.filter((o) => o.status === "COMPLETED");
@@ -143,11 +138,7 @@ router.get("/waiters/me/shift-reconciliation", requireAuth, async (req: AuthedRe
         select: { id: true, firstName: true, lastName: true, email: true },
       }),
       prisma.order.findMany({
-        where: {
-          outletId: req.auth!.outletId,
-          createdAt: { gte: dayStart },
-          created_by: req.auth!.userId,
-        },
+        where: waiterShiftOrderWhere(req.auth!.outletId, req.auth!.userId, dayStart),
         include: {
           diningTable: { select: { tableNumber: true, section: true } },
         },
@@ -170,6 +161,10 @@ router.get("/waiters/me/shift-reconciliation", requireAuth, async (req: AuthedRe
     const cashSalesMinor = successfulPayments
       .filter((p) => p.method === "CASH")
       .reduce((sum, p) => sum + p.amount, 0n);
+
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'W1',location:'waiters.ts:GET shift-reconciliation',message:'waiter recon window',data:{dayStart:dayStart.toISOString(),orderCount:orders.length,paymentHits:myPayments.length,cashSalesMinor:cashSalesMinor.toString(),numbers:orders.map((o)=>o.orderNumber)},timestamp:Date.now(),runId:'post-fix'})}).catch(()=>{});
+    // #endregion
 
     const cardSalesMinor = successfulPayments
       .filter((p) => p.method === "CARD")
@@ -226,7 +221,7 @@ router.post("/waiters/me/shift-handover", requireAuth, async (req: AuthedRequest
     const waiterName = user
       ? `${user.firstName || ""} ${user.lastName || ""}`.trim() || user.email || "Captain"
       : "Captain";
-    const dayStart = await waiterBusinessDayStart(req.auth!.outletId);
+    const dayWindow = await outletBusinessDayWindow(req.auth!.outletId);
     const payload = {
       actualCashCountedMinor: Number(req.body.actualCashCountedMinor || 0),
       openingFloatMinor: Number(req.body.openingFloatMinor || 0),
@@ -242,7 +237,7 @@ router.post("/waiters/me/shift-handover", requireAuth, async (req: AuthedRequest
         outletId: req.auth!.outletId,
         waiterId: req.auth!.userId,
         waiterName,
-        businessDate: dayStart,
+        businessDate: new Date(`${dayWindow.businessDate}T12:00:00`),
         actualCashCountedMinor: BigInt(payload.actualCashCountedMinor),
         openingFloatMinor: BigInt(payload.openingFloatMinor),
         netTipPayoutMinor: BigInt(payload.netTipPayoutMinor),
@@ -268,6 +263,9 @@ router.post("/waiters/me/shift-handover", requireAuth, async (req: AuthedRequest
         ...payload,
       });
     }).catch(() => {});
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'H1',location:'waiters.ts:POST shift-handover',message:'captain handover saved',data:{handoverId:row.id,businessDate:dayWindow.businessDate,cashSalesMinor:payload.cashSalesMinor,actualCash:payload.actualCashCountedMinor,netTip:payload.netTipPayoutMinor},timestamp:Date.now(),runId:'post-fix'})}).catch(()=>{});
+    // #endregion
     res.status(200).json({ ok: true, ...payload });
   } catch (err: any) {
     console.error("Error recording waiter shift handover:", err);
@@ -288,7 +286,7 @@ router.get("/waiters/shift-handovers", requireAuth, requirePermission("report.re
         waiterId: row.waiterId,
         waiterName: row.waiterName,
         createdAt: row.createdAt.toISOString(),
-        businessDate: row.businessDate.toISOString().slice(0, 10),
+        businessDate: `${row.businessDate.getFullYear()}-${String(row.businessDate.getMonth() + 1).padStart(2, "0")}-${String(row.businessDate.getDate()).padStart(2, "0")}`,
         actualCashCountedMinor: Number(row.actualCashCountedMinor),
         openingFloatMinor: Number(row.openingFloatMinor),
         netTipPayoutMinor: Number(row.netTipPayoutMinor),

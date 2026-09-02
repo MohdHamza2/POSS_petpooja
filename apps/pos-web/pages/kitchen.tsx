@@ -425,8 +425,8 @@ export default function KitchenMonitor() {
               const orderTypeLabel =
                 kot.orderType === "DINE_IN"
                   ? (kot.tableNumber ? `🪑 Table ${kot.tableNumber}` : "🪑 Dine-In")
-                  : kot.orderType === "TAKEAWAY"
-                  ? "🥡 Takeaway"
+                  : kot.orderType === "TAKEAWAY" || kot.orderType === "PICKUP"
+                  ? "🛍️ Pickup"
                   : kot.orderType === "DELIVERY"
                   ? "🛵 Delivery"
                   : kot.orderType === "AGGREGATOR"

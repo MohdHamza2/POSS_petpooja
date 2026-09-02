@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import Head from "next/head";
 import Link from "next/link";
 import { authedFetch, useAuthGuard } from "../lib/auth";
+import { useKapmetaSocket } from "../lib/useKapmetaSocket";
 import Nav from "../components/Nav";
 import QuickLinks from "../components/QuickLinks";
 import NotificationBell from "../components/NotificationBell";
@@ -168,10 +169,15 @@ type TimeRange = "Day" | "Month" | "Quarter" | "Year";
 function rangeFor(timeRange: TimeRange): { fromDate: string; toDate: string } {
   const now = new Date();
   const toDate = now.toISOString();
-  const from = new Date(now);
   if (timeRange === "Day") {
-    from.setDate(from.getDate() - 1);
-  } else if (timeRange === "Month") {
+    const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 5, 0, 0, 0);
+    const from = now < startToday
+      ? new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 5, 0, 0, 0)
+      : startToday;
+    return { fromDate: from.toISOString(), toDate };
+  }
+  const from = new Date(now);
+  if (timeRange === "Month") {
     from.setMonth(from.getMonth() - 1);
   } else if (timeRange === "Quarter") {
     from.setMonth(from.getMonth() - 3);
@@ -473,6 +479,22 @@ export default function AdminDashboard() {
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authLoading, timeRange]);
+
+  useKapmetaSocket(
+    (payload) => {
+      if (
+        payload.topic === "finance.order_settled" ||
+        payload.topic === "table.status_updated" ||
+        payload.topic === "inventory.stock_updated" ||
+        payload.topic === "finance.petty_cash" ||
+        payload.topic === "finance.waiter_shift_handover"
+      ) {
+        fetchReports();
+      }
+    },
+    !authLoading,
+    "admin"
+  );
 
   const formatMoney = (minor: any) => {
     if (minor === undefined || minor === null || minor === "") return "₹0.00";

@@ -1,11 +1,11 @@
 import { Router } from "express";
 import { prisma } from "../prisma";
 import { createKot, transitionKot, recallKot, PrismaKotRepository, RECALL_GRACE_WINDOW_MS } from "@kapmeta/kitchen";
-import { transitionOrder, PrismaOrderRepository } from "@kapmeta/orders";
 import { requireAuth, requirePermission, checkPermissionDirect, type AuthedRequest } from "../middleware/require-auth";
 import { mergeGroupLabelMap } from "../orchestration/table-merge";
-
-const orderRepo = new PrismaOrderRepository(prisma);
+import { deductBomStockForOrder } from "../orchestration/inventory-depletion";
+import { stepOrderTo } from "../orchestration/order-lifecycle";
+import type { OrderStatus } from "@kapmeta/shared-types/orders";
 
 const router = Router();
 
@@ -76,7 +76,10 @@ router.get("/kot", requireAuth, requirePermission("kot.read"), async (req: Authe
     const whereClause: any = {
       outletId: req.auth!.outletId,
       OR: [
-        { status: { in: ["QUEUED", "PREPARING", "READY"] } },
+        {
+          status: { in: ["QUEUED", "PREPARING", "READY"] },
+          order: { status: { notIn: ["COMPLETED", "CANCELLED", "FAILED"] } },
+        },
         { status: "SERVED", servedAt: { gt: recallCutoff } },
       ],
     };
@@ -89,7 +92,7 @@ router.get("/kot", requireAuth, requirePermission("kot.read"), async (req: Authe
       include: {
         kotItems: { include: { menuItem: { select: { name: true } } } },
         station: { select: { name: true, slaWarningSeconds: true, slaBreachSeconds: true } },
-        order: { select: { orderType: true, table_number: true, diningTable: { select: { id: true, tableNumber: true, mergeGroupId: true, mergePrimaryTableId: true } } } },
+        order: { select: { status: true, orderType: true, table_number: true, diningTable: { select: { id: true, tableNumber: true, mergeGroupId: true, mergePrimaryTableId: true } } } },
       },
       orderBy: { createdAt: "asc" },
     });
@@ -98,6 +101,10 @@ router.get("/kot", requireAuth, requirePermission("kot.read"), async (req: Authe
       .map((t) => (t.order as any)?.diningTable?.mergeGroupId)
       .filter((id: string | null | undefined): id is string => Boolean(id));
     const labels = await mergeGroupLabelMap(prisma, req.auth!.outletId, groupIds);
+
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'L3',location:'kitchen.ts:GET /kot',message:'kitchen tickets after completed-parent filter',data:{count:tickets.length,sample:tickets.slice(0,8).map((t)=>({n:t.ticketNumber,kot:t.status,orderStatus:(t.order as any)?.status,orderType:t.order?.orderType}))},timestamp:Date.now(),runId:'leftover-post'})}).catch(()=>{});
+    // #endregion
 
     res.status(200).json(
       tickets.map((t) => ({
@@ -116,7 +123,7 @@ router.get("/kot", requireAuth, requirePermission("kot.read"), async (req: Authe
           (t.order as any)?.table_number ||
           labels.get((t.order as any)?.diningTable?.mergeGroupId) ||
           t.order!.diningTable?.tableNumber ||
-          null,
+          (t.order!.orderType === "DELIVERY" ? "DELIVERY" : t.order!.orderType === "PICKUP" ? "PICKUP" : null),
         kotItems: t.kotItems.map((ki) => ({
           id: ki.id,
           quantity: ki.quantity,
@@ -185,25 +192,56 @@ router.patch("/kot/:kotTicketId/status", requireAuth, async (req: AuthedRequest,
     // Cascade KOT status transition to parent Order
     const ticket = await prisma.kOTTicket.findUnique({
       where: { id: kotTicketId },
-      include: { order: true },
+      include: { order: true, kotItems: true },
     });
 
     if (ticket && ticket.orderId) {
       let orderTargetStatus: any = null;
       let stage = "QUEUED";
+      const siblingTickets = await prisma.kOTTicket.findMany({
+        where: { orderId: ticket.orderId },
+        include: { kotItems: { select: { orderItemId: true, menuItemId: true } } },
+      });
+      const others = siblingTickets.filter((k) => k.id !== kotTicketId);
+      const stillCooking = others.filter(
+        (k) =>
+          k.status !== "CANCELLED" &&
+          k.status !== "SERVED" &&
+          k.status !== "READY"
+      );
 
       if (result.newStatus === "PREPARING") {
         orderTargetStatus = "IN_PREPARATION";
         stage = "COOKING";
       } else if (result.newStatus === "READY") {
-        orderTargetStatus = "READY";
-        stage = "FOOD_READY";
+        if (stillCooking.length === 0) {
+          orderTargetStatus = "READY";
+          stage = "FOOD_READY";
+        } else {
+          orderTargetStatus = null;
+          stage = stillCooking.some((k) => k.status === "PREPARING" || k.status === "COOKING" || k.status === "IN_PREPARATION")
+            ? "COOKING"
+            : "QUEUED";
+        }
       } else if (result.newStatus === "SERVED") {
-        const siblings = await prisma.kOTTicket.findMany({
-          where: { orderId: ticket.orderId },
-        });
-        const remaining = siblings.filter(
-          (k) => k.id !== kotTicketId && k.status !== "CANCELLED" && k.status !== "SERVED"
+        const servedItemIds = (ticket.kotItems || [])
+          .map((i) => i.orderItemId)
+          .filter((id): id is string => Boolean(id));
+        if (servedItemIds.length > 0 && ticket.order) {
+          await deductBomStockForOrder(
+            ticket.orderId,
+            ticket.order.outletId,
+            prisma,
+            req.auth!.userId,
+            "KOT_SERVED",
+            servedItemIds
+          );
+        }
+        // #region agent log
+        fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'I',location:'kitchen.ts:PATCH kot SERVED',message:'KDS serve-time BOM',data:{kotTicketId,orderId:ticket.orderId,orderType:ticket.order&&ticket.order.orderType,servedItemIds,tableId:ticket.order&&ticket.order.diningTableId},timestamp:Date.now(),runId:'serve-bom'})}).catch(()=>{});
+        // #endregion
+        const remaining = others.filter(
+          (k) => k.status !== "CANCELLED" && k.status !== "SERVED"
         );
         if (remaining.length === 0) {
           orderTargetStatus = "HANDED_OVER";
@@ -218,12 +256,18 @@ router.patch("/kot/:kotTicketId/status", requireAuth, async (req: AuthedRequest,
       }
 
       if (orderTargetStatus) {
-        await transitionOrder(ticket.orderId, orderTargetStatus, orderRepo, req.auth!.userId).catch((err) => {
-          console.error("KOT cascade transitionOrder failed:", err);
-        });
+        const stepResult = await stepOrderTo(
+          prisma,
+          ticket.orderId,
+          orderTargetStatus as OrderStatus,
+          req.auth!.userId
+        );
+        // #region agent log
+        fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'AG4',location:'kitchen.ts:stepOrderTo',message:'KOT cascade walked legal order path',data:{orderId:ticket.orderId,target:orderTargetStatus,ok:stepResult.ok,from:stepResult.from,applied:stepResult.applied,tableId:ticket.order&&ticket.order.diningTableId},timestamp:Date.now(),runId:'agg-post'})}).catch(()=>{});
+        // #endregion
       }
       // #region agent log
-      fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'K1',location:'kitchen.ts:PATCH kot status',message:'KDS status cascade',data:{kotTicketId,toStatus:result.newStatus,orderId:ticket.orderId,orderTargetStatus,stage,tableId:ticket.order&&ticket.order.diningTableId},timestamp:Date.now(),runId:'chrome-kds'})}).catch(()=>{});
+      fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'LNE',location:'kitchen.ts:PATCH kot status',message:'KDS status cascade',data:{kotTicketId,toStatus:result.newStatus,orderId:ticket.orderId,orderTargetStatus,stage,tableId:ticket.order&&ticket.order.diningTableId,ticketCount:siblingTickets.length,stillCooking:stillCooking.length,siblings:siblingTickets.map((s)=>({id:s.id,status:s.status,lines:s.kotItems.length}))},timestamp:Date.now(),runId:'line-kot-post'})}).catch(()=>{});
       // #endregion
 
       import("../websockets").then(({ broadcast }) => {

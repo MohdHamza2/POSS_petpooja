@@ -1,13 +1,10 @@
 import React, { useState, useEffect } from "react";
-import { useRouter } from "next/router";
-import { getApiBase } from "../lib/auth";
+import { getApiBase, persistAuthSession } from "../lib/auth";
 
 interface StaffProfile {
   id: string;
   name: string;
   role: string;
-  email: string;
-  avatar: string;
 }
 
 interface CaptainPinLoginModalProps {
@@ -17,25 +14,78 @@ interface CaptainPinLoginModalProps {
   outletId?: string;
 }
 
-const STAFF_LIST: StaffProfile[] = [
-  { id: "waiter-1", name: "Ramesh (Captain 1)", role: "Captain", email: "waiter@hotelkapila.com", avatar: "👨‍🍳" },
-  { id: "waiter-2", name: "Suresh (Captain 2)", role: "Captain", email: "waiter@hotelkapila.com", avatar: "🧑‍🍳" },
-  { id: "cashier-1", name: "Kapila Cashier", role: "Cashier", email: "cashier@hotelkapila.com", avatar: "💳" },
-  { id: "admin-1", name: "Store Manager", role: "Manager", email: "admin@hotelkapila.com", avatar: "🛡️" },
-];
+function staffInitials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  return parts.slice(0, 2).map((p) => p[0]?.toUpperCase() ?? "").join("") || "?";
+}
 
 export default function CaptainPinLoginModal({
   isOpen,
   onClose,
   onSuccess,
-  outletId = "a0deb015-8ef8-4ef5-aac7-6e91c9da6b5b",
+  outletId,
 }: CaptainPinLoginModalProps) {
-  const router = useRouter();
-  const [selectedStaff, setSelectedStaff] = useState<StaffProfile>(STAFF_LIST[0]);
+  const [staffList, setStaffList] = useState<StaffProfile[]>([]);
+  const [selectedStaff, setSelectedStaff] = useState<StaffProfile | null>(null);
   const [pin, setPin] = useState("");
-  const [openingFloat, setOpeningFloat] = useState("500.00");
+  const [openingFloat, setOpeningFloat] = useState("0");
   const [loading, setLoading] = useState(false);
+  const [loadingStaff, setLoadingStaff] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    if (!outletId) {
+      setStaffList([]);
+      setSelectedStaff(null);
+      setError("Select an outlet before PIN login.");
+      return;
+    }
+    let cancelled = false;
+    setLoadingStaff(true);
+    setError(null);
+    fetch(`${getApiBase()}/auth/pin-staff?outletId=${encodeURIComponent(outletId)}`)
+      .then(async (res) => {
+        const body = await res.json().catch(() => []);
+        if (!res.ok) throw new Error(body.error || "Failed to load staff");
+        return body as StaffProfile[];
+      })
+      .then((staff) => {
+        if (cancelled) return;
+        setStaffList(staff);
+        setSelectedStaff(staff[0] ?? null);
+        // #region agent log
+        fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
+          body: JSON.stringify({
+            sessionId: "9c675b",
+            hypothesisId: "PIN-A",
+            location: "CaptainPinLoginModal.tsx:loadStaff",
+            message: "PIN modal staff from API",
+            data: { outletId, count: staff.length, names: staff.map((s) => s.name) },
+            timestamp: Date.now(),
+            runId: "pin-staff",
+          }),
+        }).catch(() => {});
+        // #endregion
+        if (staff.length === 0) {
+          setError("No staff with a PIN configured for this outlet.");
+        }
+      })
+      .catch((err: Error) => {
+        if (cancelled) return;
+        setStaffList([]);
+        setSelectedStaff(null);
+        setError(err.message || "Failed to load staff");
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingStaff(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, outletId]);
 
   if (!isOpen) return null;
 
@@ -71,22 +121,42 @@ export default function CaptainPinLoginModal({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           pin,
-          email: selectedStaff.email,
+          userId: selectedStaff.id,
           outletId,
         }),
       });
 
       const data = await res.json();
       if (!res.ok) {
+        if (res.status === 429 || data.error === "PIN_LOCKED") {
+          throw new Error("Too many PIN attempts. Try again in 15 minutes.");
+        }
         throw new Error(data.error === "INVALID_CREDENTIALS" ? "Incorrect PIN. Please try again." : data.error || "Login failed");
       }
 
-      // Store tokens
+      persistAuthSession(data);
       if (typeof window !== "undefined") {
-        localStorage.setItem("kapmeta_access_token", data.accessToken);
-        localStorage.setItem("kapmeta_refresh_token", data.refreshToken);
         localStorage.setItem("kapmeta_captain_opening_float", openingFloat);
       }
+      // #region agent log
+      fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
+        body: JSON.stringify({
+          sessionId: "9c675b",
+          hypothesisId: "PIN-B",
+          location: "CaptainPinLoginModal.tsx:submit",
+          message: "PIN session persisted to kapmeta_pos_session",
+          data: {
+            userId: data.user?.userId,
+            hasPosSession: Boolean(localStorage.getItem("kapmeta_pos_session")),
+            wroteAccessTokenKey: Boolean(localStorage.getItem("kapmeta_access_token")),
+          },
+          timestamp: Date.now(),
+          runId: "pin-staff",
+        }),
+      }).catch(() => {});
+      // #endregion
 
       onSuccess(data.user);
       onClose();
@@ -115,7 +185,8 @@ export default function CaptainPinLoginModal({
 
         {/* Staff Profile Selection Chips */}
         <div className="staff-selector-row">
-          {STAFF_LIST.map((st) => (
+          {loadingStaff && <span style={{ fontSize: "0.8125rem", color: "#64748b" }}>Loading staff…</span>}
+          {!loadingStaff && staffList.map((st) => (
             <button
               key={st.id}
               type="button"
@@ -126,8 +197,9 @@ export default function CaptainPinLoginModal({
                 setError(null);
               }}
             >
-              <span className="staff-avatar">{st.avatar}</span>
+              <span className="staff-avatar">{staffInitials(st.name)}</span>
               <span className="staff-name">{st.name}</span>
+              <span className="staff-role">{st.role}</span>
             </button>
           ))}
         </div>
@@ -158,7 +230,7 @@ export default function CaptainPinLoginModal({
             ))}
           </div>
           <div style={{ fontSize: "0.6875rem", color: "#94a3b8", marginTop: "4px" }}>
-            Default test PIN: 1234
+            Use the PIN set for this staff account in User and Role Management.
           </div>
         </div>
 
@@ -186,9 +258,9 @@ export default function CaptainPinLoginModal({
             type="button"
             className="btn-unlock-captain"
             onClick={handleSubmit}
-            disabled={loading || pin.length < 4}
+            disabled={loading || pin.length < 4 || !selectedStaff}
           >
-            {loading ? "Verifying PIN..." : `Unlock & Start Shift (${selectedStaff?.name})`}
+            {loading ? "Verifying PIN..." : selectedStaff ? `Unlock & Start Shift (${selectedStaff.name})` : "Unlock & Start Shift"}
           </button>
         </div>
       </div>
@@ -265,8 +337,9 @@ export default function CaptainPinLoginModal({
         }
         .staff-chip {
           display: flex;
-          align-items: center;
-          gap: 8px;
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 2px;
           padding: 8px 10px;
           border: 1px solid #e2e8f0;
           background: #f8fafc;
@@ -284,7 +357,27 @@ export default function CaptainPinLoginModal({
           box-shadow: 0 0 0 1px #2563eb;
         }
         .staff-avatar {
-          font-size: 1.1rem;
+          font-size: 0.7rem;
+          font-weight: 800;
+          width: 1.6rem;
+          height: 1.6rem;
+          border-radius: 999px;
+          background: #e2e8f0;
+          color: #334155;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          flex-shrink: 0;
+        }
+        .staff-chip {
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 2px;
+        }
+        .staff-role {
+          font-size: 0.65rem;
+          font-weight: 500;
+          color: #64748b;
         }
 
         .float-row {

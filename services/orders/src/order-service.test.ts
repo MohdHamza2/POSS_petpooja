@@ -237,7 +237,7 @@ function makeFakeListingRepo(seed: OrderSummary[]) {
           return !["COMPLETED", "CANCELLED", "FAILED"].includes(order.status);
         }
         if (filter.view === "online") {
-          return order.orderType === "AGGREGATOR";
+          return order.orderType === "DELIVERY";
         }
         if (filter.status && order.status !== filter.status) return false;
         if (filter.orderType && order.orderType !== filter.orderType) return false;
@@ -401,8 +401,8 @@ function makeSampleOrders(): OrderSummary[] {
   return [
     { ...base, id: "o1", orderNumber: "ORD-1", orderType: "DINE_IN", status: "PLACED", grandTotalMinor: 100n, createdAt: new Date("2026-01-01"), itemCount: 2 },
     { ...base, id: "o2", orderNumber: "ORD-2", orderType: "DINE_IN", status: "COMPLETED", grandTotalMinor: 200n, createdAt: new Date("2026-01-02"), itemCount: 1 },
-    { ...base, id: "o3", orderNumber: "ORD-3", orderType: "AGGREGATOR", status: "IN_PREPARATION", grandTotalMinor: 300n, createdAt: new Date("2026-01-03"), itemCount: 3 },
-    { ...base, id: "o4", orderNumber: "ORD-4", orderType: "AGGREGATOR", status: "COMPLETED", grandTotalMinor: 400n, createdAt: new Date("2026-01-04"), itemCount: 4 },
+    { ...base, id: "o3", orderNumber: "ORD-3", orderType: "DELIVERY", status: "IN_PREPARATION", grandTotalMinor: 300n, createdAt: new Date("2026-01-03"), itemCount: 3 },
+    { ...base, id: "o4", orderNumber: "ORD-4", orderType: "DELIVERY", status: "COMPLETED", grandTotalMinor: 400n, createdAt: new Date("2026-01-04"), itemCount: 4 },
     { ...base, id: "o5", orderNumber: "ORD-5", orderType: "DINE_IN", status: "CANCELLED", grandTotalMinor: 500n, createdAt: new Date("2026-01-05"), itemCount: 1 },
   ];
 }
@@ -416,7 +416,7 @@ describe("listOrders", () => {
     expect(result.map((o) => o.id).sort()).toEqual(["o1", "o3"]);
   });
 
-  it("view: 'online' returns only AGGREGATOR orderType orders regardless of status", async () => {
+  it("view: 'online' returns only DELIVERY orderType orders regardless of status", async () => {
     const { repo } = makeFakeListingRepo(makeSampleOrders());
 
     const result = await listOrders("outlet-1", { view: "online" }, repo);

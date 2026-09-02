@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import Link from "next/link";
 import { useRouter } from "next/router";
 import { authedFetch, logout } from "../lib/auth";
+import { useKapmetaSocket } from "../lib/useKapmetaSocket";
 import QuickSearchModal from "./QuickSearchModal";
 import ItemToggleModal from "./ItemToggleModal";
 import HoldOrdersDrawer from "./HoldOrdersDrawer";
@@ -74,15 +75,49 @@ export default function PetPoojaHeader({
         if (data && typeof data.isOnline === "boolean") {
           setIsStoreOnline(data.isOnline);
         }
+        if (data && typeof data.dineInActive === "boolean") setDineInActive(data.dineInActive);
+        if (data && typeof data.deliveryActive === "boolean") setDeliveryActive(data.deliveryActive);
+        if (data && typeof data.pickupActive === "boolean") setTakeawayActive(data.pickupActive);
       })
       .catch(() => {});
   }, []);
+
+  useKapmetaSocket(
+    (payload) => {
+      if (payload.topic !== "outlet.store_status_updated") return;
+      const d = payload.data || {};
+      if (typeof d.isOnline === "boolean") setIsStoreOnline(d.isOnline);
+      if (typeof d.dineInActive === "boolean") setDineInActive(d.dineInActive);
+      if (typeof d.deliveryActive === "boolean") setDeliveryActive(d.deliveryActive);
+      if (typeof d.pickupActive === "boolean") setTakeawayActive(d.pickupActive);
+    },
+    true,
+    "pos-header"
+  );
 
   const unreadAlertsCount = notifications.filter((n) => !n.isRead).length;
 
   const markAllAlertsRead = () => {
     setNotifications((prev) => prev.map((n) => ({ ...n, isRead: true })));
     authedFetch("/notifications/read-all", { method: "POST" }).catch(() => {});
+  };
+
+  const persistChannelFlag = async (
+    flag: "dineInActive" | "deliveryActive" | "pickupActive",
+    next: boolean,
+    revert: () => void,
+  ) => {
+    try {
+      const res = await authedFetch("/settings/store-status", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [flag]: next }),
+      });
+      if (!res.ok) revert();
+    } catch (e) {
+      console.error(e);
+      revert();
+    }
   };
 
   const handleToggleStore = async () => {
@@ -387,7 +422,11 @@ export default function PetPoojaHeader({
                 <button
                   type="button"
                   className={`channel-pill-btn ${dineInActive ? "active" : "inactive"}`}
-                  onClick={() => setDineInActive(!dineInActive)}
+                  onClick={() => {
+                    const next = !dineInActive;
+                    setDineInActive(next);
+                    persistChannelFlag("dineInActive", next, () => setDineInActive(!next));
+                  }}
                 >
                   {dineInActive ? "Active" : "Paused"}
                 </button>
@@ -404,7 +443,11 @@ export default function PetPoojaHeader({
                 <button
                   type="button"
                   className={`channel-pill-btn ${deliveryActive ? "active" : "inactive"}`}
-                  onClick={() => setDeliveryActive(!deliveryActive)}
+                  onClick={() => {
+                    const next = !deliveryActive;
+                    setDeliveryActive(next);
+                    persistChannelFlag("deliveryActive", next, () => setDeliveryActive(!next));
+                  }}
                 >
                   {deliveryActive ? "Active" : "Paused"}
                 </button>
@@ -421,7 +464,11 @@ export default function PetPoojaHeader({
                 <button
                   type="button"
                   className={`channel-pill-btn ${takeawayActive ? "active" : "inactive"}`}
-                  onClick={() => setTakeawayActive(!takeawayActive)}
+                  onClick={() => {
+                    const next = !takeawayActive;
+                    setTakeawayActive(next);
+                    persistChannelFlag("pickupActive", next, () => setTakeawayActive(!next));
+                  }}
                 >
                   {takeawayActive ? "Active" : "Paused"}
                 </button>

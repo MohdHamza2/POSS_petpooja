@@ -3,6 +3,7 @@ import { createApp } from './app';
 import { setupWebSockets } from './websockets';
 import { prisma } from './prisma';
 import { startOutboxProcessor } from './orchestration/outbox-processor';
+import { ensureMonthlyPartitions } from './ensure-monthly-partitions';
 
 const app = createApp();
 
@@ -25,6 +26,7 @@ server.on("error", (err: NodeJS.ErrnoException) => {
 
 server.listen(port, () => {
   startOutboxProcessor(prisma);
+  void ensureMonthlyPartitions(prisma);
   // eslint-disable-next-line no-console
   console.log(`Kapmeta API listening on port ${port}`);
 });

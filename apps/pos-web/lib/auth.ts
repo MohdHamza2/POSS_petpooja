@@ -62,6 +62,25 @@ function isBrowser(): boolean {
 // Decodes the (unsigned-here, already-trusted-because-we-just-received-it-over-TLS)
 // JWT payload to recover the sessionId claim for logout — the login response
 // itself doesn't echo session.id, and we must not invent one.
+export function persistAuthSession(data: {
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: string | Date;
+  user: { userId: string; email: string; outletId: string };
+}): void {
+  if (!isBrowser()) return;
+  const stored: StoredSession = {
+    accessToken: data.accessToken,
+    refreshToken: data.refreshToken,
+    expiresAt: typeof data.expiresAt === "string" ? data.expiresAt : data.expiresAt.toISOString(),
+    userId: data.user.userId,
+    email: data.user.email,
+    outletId: data.user.outletId,
+    sessionId: decodeSessionIdFromToken(data.accessToken),
+  };
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
+}
+
 function decodeSessionIdFromToken(accessToken: string): string | undefined {
   try {
     const payload = accessToken.split(".")[1];
@@ -176,6 +195,18 @@ export interface OutletSummary {
 
 // Real outlets the current user has a UserRole grant for (GET /auth/outlets/mine,
 // apps/api/src/routes/auth.ts) — never a hardcoded list per repo CLAUDE.md.
+export async function fetchPublicOutlets(code: string): Promise<OutletSummary[]> {
+  const trimmed = code.trim();
+  if (!trimmed) return [];
+  try {
+    const res = await fetch(`${getApiBase()}/auth/outlets?code=${encodeURIComponent(trimmed)}`);
+    if (!res.ok) return [];
+    return (await res.json()) as OutletSummary[];
+  } catch {
+    return [];
+  }
+}
+
 export async function fetchMyOutlets(): Promise<OutletSummary[]> {
   const session = getSession();
   if (!session) return [];

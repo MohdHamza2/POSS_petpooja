@@ -64,14 +64,23 @@ export async function deductBomStockForOrder(
   outletId: string,
   prisma: PrismaClient,
   actorUserId?: string,
-  reasonCode: string = "ORDER_SETTLED"
+  reasonCode: string = "ORDER_SETTLED",
+  orderItemIds?: string[]
 ): Promise<BomDeductionResult> {
   const details: BomDeductionResult["details"] = [];
   let deductedCount = 0;
   let skippedDuplicate = 0;
 
+  if (orderItemIds && orderItemIds.length === 0) {
+    return { deductedCount: 0, skippedDuplicate: 0, details: [] };
+  }
+
   const orderItems = await prisma.orderItem.findMany({
-    where: { orderId, isVoided: false },
+    where: {
+      orderId,
+      isVoided: false,
+      ...(orderItemIds ? { id: { in: orderItemIds } } : {}),
+    },
   });
 
   if (orderItems.length === 0) {
@@ -221,7 +230,7 @@ export async function deductBomStockForOrder(
 
 
   // #region agent log
-  fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'F',location:'inventory-depletion.ts:deductBomStockForOrder',message:'BOM deduct result',data:{orderId,outletId,reasonCode,deductedCount,skippedDuplicate,detailCount:details.length,first:details[0]?{ingredientName:details[0].ingredientName,ingredientId:details[0].ingredientId,deductedQty:details[0].deductedQty,remainingStock:details[0].remainingStock,shortage:details[0].shortage}:null},timestamp:Date.now(),runId:'post-fix'})}).catch(()=>{});
+  fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'F',location:'inventory-depletion.ts:deductBomStockForOrder',message:'BOM deduct result',data:{orderId,outletId,reasonCode,itemFilter:orderItemIds?orderItemIds.length:'all',deductedCount,skippedDuplicate,detailCount:details.length,first:details[0]?{ingredientName:details[0].ingredientName,ingredientId:details[0].ingredientId,deductedQty:details[0].deductedQty,remainingStock:details[0].remainingStock,shortage:details[0].shortage}:null},timestamp:Date.now(),runId:'serve-bom'})}).catch(()=>{});
   // #endregion
   return { deductedCount, skippedDuplicate, details };
 }

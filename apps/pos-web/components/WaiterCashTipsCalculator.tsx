@@ -38,7 +38,7 @@ export default function WaiterCashTipsCalculator({
   const [loading, setLoading] = useState(true);
 
   // Cash Ledger States
-  const [openingFloat, setOpeningFloat] = useState(500);
+  const [openingFloat, setOpeningFloat] = useState(0);
   const [cashDrop, setCashDrop] = useState(0);
   const [directCashTips, setDirectCashTips] = useState(0);
   const [tipSharePercent, setTipSharePercent] = useState(10); // 10% to kitchen / busboys
@@ -58,8 +58,6 @@ export default function WaiterCashTipsCalculator({
   useEffect(() => {
     if (isOpen) {
       loadShiftData();
-      const savedFloat = localStorage.getItem("kapmeta_captain_opening_float");
-      if (savedFloat) setOpeningFloat(parseFloat(savedFloat) || 0);
     }
   }, [isOpen]);
 
@@ -70,6 +68,18 @@ export default function WaiterCashTipsCalculator({
       if (res.ok) {
         const data = await res.json();
         setShiftData(data);
+      }
+      const savedFloat = localStorage.getItem("kapmeta_captain_opening_float");
+      if (savedFloat != null && savedFloat !== "") {
+        setOpeningFloat(parseFloat(savedFloat) || 0);
+      } else {
+        const drawerRes = await authedFetch("/finance/cash-drawer");
+        if (drawerRes.ok) {
+          const drawer = await drawerRes.json();
+          setOpeningFloat(Number(drawer.openingFloatMinor || 0) / 100);
+        } else {
+          setOpeningFloat(0);
+        }
       }
     } catch (e) {
       console.error("Failed to load shift reconciliation", e);

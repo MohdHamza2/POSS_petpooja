@@ -36,11 +36,26 @@ export default function ItemToggleModal({ onClose }: ItemToggleModalProps) {
           name: it.name,
           categoryName: it.categoryName || it.category?.name || "General",
           priceMinor: Number(it.priceMinor || 0),
-          isStocked: it.availability ? it.availability.isStocked : true,
-          stockQty: it.availability ? it.availability.stockQty : 100,
+          isStocked: typeof it.isStocked === "boolean" ? it.isStocked : (it.availability ? it.availability.isStocked : true),
+          stockQty: typeof it.stockQty === "number" ? it.stockQty : (it.availability ? it.availability.stockQty : 100),
           isVeg: it.isVeg ?? true,
         }));
         setItems(mapped);
+        // #region agent log
+        fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
+          body: JSON.stringify({
+            sessionId: "9c675b",
+            hypothesisId: "86B",
+            location: "ItemToggleModal.tsx:loadAvailability",
+            message: "86 modal mapped stock flags",
+            data: { count: mapped.length, offCount: mapped.filter((i: ItemState) => !i.isStocked).length },
+            timestamp: Date.now(),
+            runId: "pause-86",
+          }),
+        }).catch(() => {});
+        // #endregion
       }
     } catch (err) {
       console.error("Failed to load item availability", err);

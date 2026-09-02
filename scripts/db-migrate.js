@@ -140,6 +140,13 @@ async function main() {
     } else {
       await applyHistoricSql(client, files);
     }
+
+    try {
+      const ensured = await client.query('SELECT ensure_monthly_partitions(18) AS n');
+      debugLog('P', 'monthly partitions ensured', { monthsAhead: 18, createdOrPresent: ensured.rows[0] && ensured.rows[0].n });
+    } catch (err) {
+      debugLog('P', 'monthly partition ensure skipped', { error: String(err && err.message) });
+    }
   } finally {
     await client.end();
   }

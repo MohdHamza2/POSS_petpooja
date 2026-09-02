@@ -3,6 +3,7 @@ import { transitionOrder, PrismaOrderRepository } from "@kapmeta/orders";
 import type { OrderStatus } from "@kapmeta/shared-types/orders";
 import { deductBomStockForOrder } from "./inventory-depletion";
 import { dissolveMergeGroupForTable } from "./table-merge";
+import { cascadeKotTicketsTo } from "./order-lifecycle";
 
 export interface SettleOrderInput {
   outletId: string;
@@ -70,6 +71,18 @@ async function orderHasUnservedKot(prisma: PrismaClient, orderId: string): Promi
     where: { orderId, status: { notIn: ["SERVED", "CANCELLED"] } },
   });
   return n > 0;
+}
+
+async function cascadeKitchenOnSettle(
+  prisma: PrismaClient,
+  orderId: string,
+  userId: string
+): Promise<boolean> {
+  const kotCascade = await cascadeKotTicketsTo(prisma, orderId, "SERVED", userId);
+  // #region agent log
+  fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'OCC3',location:'settle-order.ts:kot-cascade',message:'settle cascaded kitchen tickets',data:{orderId,kotTarget:kotCascade.target,kotCount:kotCascade.ticketIds.length,from:kotCascade.from},timestamp:Date.now(),runId:'occ-post'})}).catch(()=>{});
+  // #endregion
+  return orderHasUnservedKot(prisma, orderId);
 }
 
 async function writeInvoicesForPayments(
@@ -160,7 +173,7 @@ export async function settleOrderCommand(
         data: { settledAt: new Date() },
       });
     }
-    const cooking = await orderHasUnservedKot(prisma, orderId);
+    const cooking = await cascadeKitchenOnSettle(prisma, orderId, userId);
     const dissolved = cooking
       ? { ids: [] as string[], numbers: [] as string[] }
       : (order.diningTableId
@@ -221,8 +234,8 @@ export async function settleOrderCommand(
     order.customerId = input.customerId;
   }
 
-  const isTakeaway = order.orderType === "PICKUP" || String(order.orderType) === "TAKEAWAY";
-  const statusChain = isTakeaway ? TAKEAWAY_CHAIN : DINE_CHAIN;
+  const isOffFloor = order.orderType !== "DINE_IN";
+  const statusChain = isOffFloor ? TAKEAWAY_CHAIN : DINE_CHAIN;
   const terminal = new Set(["COMPLETED", "CANCELLED", "FAILED"]);
 
   for (const targetStatus of statusChain) {
@@ -319,10 +332,11 @@ export async function settleOrderCommand(
       grandTotal: invoiceSum,
       subtotal: invoiceSum,
       taxTotal: invoiceTaxSum,
+      ...(order.created_by ? {} : { created_by: userId }),
     },
   });
 
-  const cooking = await orderHasUnservedKot(prisma, orderId);
+  const cooking = await cascadeKitchenOnSettle(prisma, orderId, userId);
   const dissolved = cooking
     ? { ids: [] as string[], numbers: [] as string[] }
     : (order.diningTableId
@@ -337,7 +351,7 @@ export async function settleOrderCommand(
 
   const bom = await deductBomStockForOrder(orderId, outletId, prisma, userId, "ORDER_SETTLED");
   // #region agent log
-  fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'H',location:'settle-order.ts:loyalty',message:'loyalty branch',data:{orderId,hasCustomerId:Boolean(order.customerId),payAmount:payAmount.toString(),grandTotal:order.grandTotal.toString(),bomDeducted:bom.deductedCount,paisePerPoint:null,runId:'post-fix'},timestamp:Date.now(),runId:'post-fix'})}).catch(()=>{});
+  fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'H',location:'settle-order.ts:loyalty',message:'loyalty branch',data:{orderId,hasCustomerId:Boolean(order.customerId),payAmount:payAmount.toString(),grandTotal:order.grandTotal.toString(),bomDeducted:bom.deductedCount,bomSkipped:bom.skippedDuplicate,paisePerPoint:null,runId:'serve-bom'},timestamp:Date.now(),runId:'serve-bom'})}).catch(()=>{});
   // #endregion
 
   if (order.customerId) {

@@ -92,12 +92,20 @@ function daysAgoIso(days: number): string {
   return `${y}-${m}-${d}`;
 }
 
-function todayIso(): string {
+function businessDateIso(): string {
   const now = new Date();
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, "0");
-  const d = String(now.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
+  const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 5, 0, 0, 0);
+  const d = now < startToday
+    ? new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
+    : now;
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function todayIso(): string {
+  return businessDateIso();
 }
 
 export default function FinancePage() {
@@ -203,14 +211,15 @@ export default function FinancePage() {
 
   useKapmetaSocket(
     (payload) => {
-      if (payload.topic === "finance.waiter_shift_handover" || payload.topic === "finance.order_settled") {
+      if (payload.topic === "finance.waiter_shift_handover" || payload.topic === "finance.order_settled" || payload.topic === "finance.petty_cash") {
         fetchWaiterHandovers();
         fetchReport();
         fetchCashDrawer();
-        fetchCashDrawer();
-        fetchReport();
         if (payload.topic === "finance.waiter_shift_handover") {
           showToast("Captain cash & tips handover received");
+        }
+        if (payload.topic === "finance.petty_cash") {
+          showToast("Petty cash posted to drawer");
         }
       }
     },

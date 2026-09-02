@@ -599,6 +599,15 @@ inventoryRouter.post("/purchase-orders/:id/receive", requireAuth, requirePermiss
     fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'C',location:'inventory.ts:POST receive',message:'GRN receive applied',data:{poId,poNumber:po.po_number,nextStatus,receivedCount:receivedItems.length,addedQty:receivedItems.reduce((s,r)=>s+Number(r.addedQty||0),0)},timestamp:Date.now(),runId:'grn-pre'})}).catch(()=>{});
     // #endregion
 
+    import("../websockets").then(({ broadcast }) => {
+      broadcast("inventory.stock_updated", {
+        outletId,
+        poId,
+        poNumber: po.po_number,
+        receivedCount: receivedItems.length,
+      });
+    }).catch(() => {});
+
     res.status(200).json({
       ok: true,
       message: `Goods for ${po.po_number} received. Status ${nextStatus}.`,
