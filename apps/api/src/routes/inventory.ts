@@ -180,6 +180,45 @@ inventoryRouter.post("/stock/deduct", requireAuth, requirePermission("inventory.
   }
 });
 
+// POST /wastage
+inventoryRouter.post("/wastage", requireAuth, requirePermission("inventory.stock.deduct"), async (req: AuthedRequest, res) => {
+  try {
+    const { items, reason, notes } = req.body;
+    const outletId = req.auth!.outletId;
+    const userId = req.auth!.userId;
+
+    if (!items || !Array.isArray(items)) {
+      return res.status(400).json({ error: "items must be an array" });
+    }
+
+    for (const item of items) {
+      const { ingredientId, quantityLost } = item;
+      const ingredient = await (prisma as any).ingredients.findUnique({ where: { id: ingredientId } });
+      if (ingredient) {
+        const newStock = Number(ingredient.current_stock_qty) - Number(quantityLost);
+        await (prisma as any).ingredients.update({
+          where: { id: ingredientId },
+          data: { current_stock_qty: newStock }
+        });
+        
+        await prisma.inventoryWastageLog.create({
+          data: {
+            outletId,
+            ingredientId,
+            quantity: Number(quantityLost),
+            reason: reason || "Unknown",
+            loggedBy: userId
+          }
+        });
+      }
+    }
+    res.status(201).json({ success: true });
+  } catch (err: any) {
+    console.error("Error in wastage:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // List recipes
 inventoryRouter.get("/recipes", requireAuth, requirePermission("inventory.read"), async (req: AuthedRequest, res) => {
   try {

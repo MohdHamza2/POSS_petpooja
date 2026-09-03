@@ -600,7 +600,7 @@ financeRouter.post("/card-settlement", requireAuth, requirePermission("report.re
         actor_id: userId,
         action: "UPDATE",
         entityType: "FINANCE_EDC_SETTLEMENT",
-        entityId: terminalId || "EDC-01",
+        entityId: terminalId || outletId,
         beforeState: { expectedDigitalMinor: String(expectedDigitalMinor) },
         afterState: { actualBatchMinor: String(actualBatchMinor), varianceMinor: String(varianceMinor), notes },
         createdAt: new Date(),
@@ -631,7 +631,7 @@ financeRouter.post("/z-report/seal", requireAuth, requirePermission("report.read
     
     // Check if already sealed
     const existingSeal = await prisma.auditLog.findFirst({
-      where: { outletId, entityType: "FINANCE_Z_REPORT", action: "APPROVE", entityId: window.businessDate }
+      where: { outletId, entityType: "FINANCE_Z_REPORT", action: "APPROVE", afterState: { equals: { businessDate: window.businessDate } } as any }
     });
     if (existingSeal) {
       return res.status(409).json({ error: "Z-Report for this business date is already sealed." });
@@ -655,8 +655,9 @@ financeRouter.post("/z-report/seal", requireAuth, requirePermission("report.read
         actor_id: req.auth!.userId,
         action: "APPROVE",
         entityType: "FINANCE_Z_REPORT",
-        entityId: window.businessDate,
+        entityId: outletId,
         afterState: { 
+          businessDate: window.businessDate,
           hash, 
           signature: hashPayload,
           grandTotal: report.grandTotal.toString(),

@@ -256,11 +256,10 @@ crmRouter.post("/customers/:id/addresses", requireAuth, requirePermission("crm.w
     const address = await (prisma as any).customer_addresses.create({
       data: {
         customer_id: customer.id,
-        address_line1: addressLine1,
-        address_line2: addressLine2 || null,
+        line1: addressLine1,
+        line2: addressLine2 || null,
         city,
-        state: state || null,
-        zip_code: zipCode,
+        postal_code: zipCode,
         is_default: isDefault || false,
       },
     });

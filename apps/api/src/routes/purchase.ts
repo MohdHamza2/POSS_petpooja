@@ -95,4 +95,45 @@ router.patch(
   },
 );
 
+router.post(
+  "/purchase-orders/:id/pay",
+  requireAuth,
+  requirePermission("inventory.po.approve"),
+  async (req: AuthedRequest, res) => {
+    try {
+      const { paymentMethod } = req.body;
+      const outletId = req.auth!.outletId;
+      const poId = req.params.id;
+
+      const po = await prisma.purchase_orders.findUnique({ where: { id: poId } });
+      if (!po) return res.status(404).json({ error: "PO not found" });
+      if (po.status === "PAID") return res.status(400).json({ error: "PO already paid" });
+      
+      const newStatus = "PAID";
+      await prisma.purchase_orders.update({
+        where: { id: poId },
+        data: { status: newStatus }
+      });
+
+      // Write to petty cash
+      if (paymentMethod === "CASH") {
+        await prisma.petty_cash_ledger.create({
+          data: {
+            outlet_id: outletId,
+            amount_minor: -po.total_amount_minor, // negative for expense
+            category: "PO_PAYMENT",
+            description: `Paid PO ${po.po_number}`,
+            recorded_by: req.auth!.userId,
+          }
+        });
+      }
+      
+      res.status(200).json({ status: newStatus });
+    } catch (err: any) {
+      console.error(err);
+      res.status(500).json({ error: "internal error" });
+    }
+  }
+);
+
 export const purchaseRouter = router;
