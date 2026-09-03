@@ -1,2 +1,10 @@
 [allowlist]
-paths = ['''graphify-out/.*''']
+description = "Ignore graphify-out directory and past commits containing it"
+paths = [
+    '''graphify-out/.*'''
+]
+commits = [
+    "11272ea0bc039001862877ccc0596b9ce2e8ea17",
+    "6f294022f321e14392afb178697129028333b818",
+    "d3388262cee74cb2919774b3313002e715c30b16"
+]
