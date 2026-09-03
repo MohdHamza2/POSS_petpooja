@@ -1,2 +1,0 @@
-# Ignore graphify output since it contains full AST which matches false positive secrets
-graphify-out/

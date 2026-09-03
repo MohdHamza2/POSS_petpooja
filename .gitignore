@@ -50,3 +50,4 @@ infra/terraform/.terraform/
 .agents/skills/
 skills-lock.json
 packages/shared-types/*.js
+graphify-out/
