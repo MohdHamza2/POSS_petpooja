@@ -235,7 +235,7 @@ export async function stampOrderMergeLabel(
     await prisma.order.update({
       where: { id: orderId },
       data: { table_number: label },
-    }).catch(err => console.error('Background task error:', err?.message || err));
+    }).catch((err: any) => console.error('Background task error:', err?.message || err));
   }
   return { ids: rows.map((r: any) => r.id), label };
 }
@@ -251,7 +251,7 @@ export async function occupyMergeMembers(
   await prisma.diningTable.updateMany({
     where: { outletId, id: { in: target } },
     data: { status: "OCCUPIED" },
-  }).catch(err => console.error('Background task error:', err?.message || err));
+  }).catch((err: any) => console.error('Background task error:', err?.message || err));
   return target;
 }
 

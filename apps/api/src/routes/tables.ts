@@ -217,13 +217,13 @@ tablesRouter.get("/tables", requireAuth, async (req: AuthedRequest, res) => {
       await prisma.diningTable.updateMany({
         where: { id: { in: occupiedNoOrder.map((t: any) => t.id) } },
         data: { status: "VACANT" },
-      }).catch(err => console.error('Background task error:', err?.message || err));
+      }).catch((err: any) => console.error('Background task error:', err?.message || err));
     }
     if (vacantWithOrder.length > 0) {
       await prisma.diningTable.updateMany({
         where: { id: { in: vacantWithOrder.map((t: any) => t.id) } },
         data: { status: "OCCUPIED" },
-      }).catch(err => console.error('Background task error:', err?.message || err));
+      }).catch((err: any) => console.error('Background task error:', err?.message || err));
     }
 
     const printedIds = await orderIdsWithBillPrint(outletId, [...orderMap.values()].map((o: any) => o.id));
@@ -276,7 +276,7 @@ tablesRouter.get("/tables", requireAuth, async (req: AuthedRequest, res) => {
 
 
     res.status(200).json(mapped);
-  } catch (err) {
+  } catch (err: any) {
     console.error("Error listing tables:", err);
     res.status(500).json({ error: "Failed to list tables" });
   }
@@ -329,7 +329,7 @@ tablesRouter.post("/tables/:id/vacant", requireAuth, async (req: AuthedRequest, 
       data: {
         diningTableId: null,
       },
-    }).catch(err => console.error('Background task error:', err?.message || err));
+    }).catch((err: any) => console.error('Background task error:', err?.message || err));
 
     import("../websockets").then(({ broadcast }) => {
       for (const id of vacatedIds) {
@@ -339,7 +339,7 @@ tablesRouter.post("/tables/:id/vacant", requireAuth, async (req: AuthedRequest, 
           stage: null,
         });
       }
-    }).catch(err => console.error('Background task error:', err?.message || err));
+    }).catch((err: any) => console.error('Background task error:', err?.message || err));
 
     res.status(200).json({
       ok: true,
@@ -403,7 +403,7 @@ tablesRouter.post("/tables/:id/serve", requireAuth, async (req: AuthedRequest, r
       await prisma.kOTTicket.update({
         where: { id: kot.id },
         data: { status: "SERVED", servedAt: new Date() },
-      }).catch(err => console.error('Background task error:', err?.message || err));
+      }).catch((err: any) => console.error('Background task error:', err?.message || err));
     }
 
     const servedItemIds = [...new Set(
@@ -427,7 +427,7 @@ tablesRouter.post("/tables/:id/serve", requireAuth, async (req: AuthedRequest, r
       activeOrder.status !== "SETTLED" &&
       activeOrder.status !== "PAID"
     ) {
-      await transitionOrder(activeOrder.id, "SERVED" as any, orderRepo, userId).catch(err => console.error('Background task error:', err?.message || err));
+      await transitionOrder(activeOrder.id, "SERVED" as any, orderRepo, userId).catch((err: any) => console.error('Background task error:', err?.message || err));
     }
     const stage = stillCooking
       ? deriveKitchenStage({ kotTickets: leftover, status: activeOrder.status }) || "QUEUED"
@@ -450,7 +450,7 @@ tablesRouter.post("/tables/:id/serve", requireAuth, async (req: AuthedRequest, r
         tableId,
         stage,
       });
-    }).catch(err => console.error('Background task error:', err?.message || err));
+    }).catch((err: any) => console.error('Background task error:', err?.message || err));
 
     res.status(200).json({
       ok: true,
@@ -575,7 +575,7 @@ tablesRouter.get("/tables/occupancy", requireAuth, async (req: AuthedRequest, re
       capacityUtilizationPercent: Number(capacityUtilizationPercent.toFixed(1)),
       sections,
     });
-  } catch (err) {
+  } catch (err: any) {
     console.error("Error computing table occupancy:", err);
     res.status(500).json({ error: "Failed to compute table occupancy" });
   }
@@ -663,7 +663,7 @@ tablesRouter.get("/tables/sections", requireAuth, async (req: AuthedRequest, res
       sections.push("AC Dining", "Main Hall", "Outdoor Garden", "First Floor");
     }
     res.status(200).json(sections);
-  } catch (err) {
+  } catch (err: any) {
     console.error("Error listing table sections:", err);
     res.status(500).json({ error: "Failed to list table sections" });
   }
@@ -720,7 +720,7 @@ tablesRouter.get("/tables/:id", requireAuth, async (req: AuthedRequest, res) => 
       active_order_id: activeOrder?.id || null,
       order: activeOrder || null,
     });
-  } catch (err) {
+  } catch (err: any) {
     console.error("Error fetching table:", err);
     res.status(500).json({ error: "Failed to fetch table" });
   }
@@ -744,7 +744,7 @@ tablesRouter.put("/tables/:id", requireAuth, requirePermission("settings.manage"
     });
 
     res.status(200).json(table);
-  } catch (err) {
+  } catch (err: any) {
     console.error("Error updating table:", err);
     res.status(500).json({ error: "Failed to update table" });
   }
@@ -784,7 +784,7 @@ const handleTableStatus = async (req: AuthedRequest, res: any) => {
             status: { in: ["SERVED", "HANDED_OVER", "COMPLETED", "SETTLED", "PAID"] },
           },
           data: { diningTableId: null },
-        }).catch(err => console.error('Background task error:', err?.message || err));
+        }).catch((err: any) => console.error('Background task error:', err?.message || err));
       }
     }
 
@@ -795,7 +795,7 @@ const handleTableStatus = async (req: AuthedRequest, res: any) => {
 
     import("../websockets").then(({ broadcast }) => {
       broadcast("table.status_updated", { tableId: req.params.id, status });
-    }).catch(err => console.error('Background task error:', err?.message || err));
+    }).catch((err: any) => console.error('Background task error:', err?.message || err));
 
     res.status(200).json(table);
   } catch (err: any) {
@@ -1032,7 +1032,7 @@ const handleTableTransfer = async (req: AuthedRequest, res: any) => {
       broadcast("table.status_updated", { tableId: sourceTableId, status: sourceVacated ? "VACANT" : "OCCUPIED" });
       broadcast("table.status_updated", { tableId: targetTableId, status: "OCCUPIED" });
       broadcast("kot.status_updated", { orderId: transferredOrderId, tableNumber: targetTable.tableNumber });
-    }).catch(err => console.error('Background task error:', err?.message || err));
+    }).catch((err: any) => console.error('Background task error:', err?.message || err));
 
     res.status(200).json({
       success: true,
@@ -1132,7 +1132,7 @@ const handleTableMerge = async (req: AuthedRequest, res: any) => {
       for (const m of afterMembers) {
         broadcast("table.status_updated", { tableId: m.id, status: "OCCUPIED" });
       }
-    }).catch(err => console.error('Background task error:', err?.message || err));
+    }).catch((err: any) => console.error('Background task error:', err?.message || err));
 
     await writeAuditLog(prisma, {
       outletId,
@@ -1231,7 +1231,7 @@ tablesRouter.post("/tables/unmerge", requireAuth, async (req: AuthedRequest, res
           status: m.id === tableId && !isPrimary ? "VACANT" : m.status,
         });
       }
-    }).catch(err => console.error('Background task error:', err?.message || err));
+    }).catch((err: any) => console.error('Background task error:', err?.message || err));
 
     res.status(200).json({ ok: true, tableId, dissolvedPrimary: isPrimary });
   } catch (err: any) {
@@ -1290,7 +1290,7 @@ tablesRouter.patch("/tables/:id", requireAuth, async (req: AuthedRequest, res) =
         capacity: updated.capacity,
         section: updated.section,
       });
-    }).catch(err => console.error('Background task error:', err?.message || err));
+    }).catch((err: any) => console.error('Background task error:', err?.message || err));
 
     res.status(200).json(updated);
   } catch (err: any) {

@@ -83,7 +83,7 @@ crmRouter.post("/customers", requireAuth, requirePermission("crm.write"), async 
         balance: Number(req.body.loyaltyPoints || 0),
         tier: "SILVER",
       },
-    }).catch(err => console.error('Background task error:', err?.message || err));
+    }).catch((err: any) => console.error('Background task error:', err?.message || err));
 
     res.status(201).json(mapCustomerResponse(customer));
   } catch (error: any) {
@@ -221,7 +221,7 @@ crmRouter.post("/loyalty/redeem", requireAuth, requirePermission("crm.write"), a
         balance: { decrement: pts },
         updated_at: new Date(),
       },
-    }).catch(err => console.error('Background task error:', err?.message || err));
+    }).catch((err: any) => console.error('Background task error:', err?.message || err));
 
     res.status(200).json(mapCustomerResponse(updatedCustomer));
   } catch (error: any) {
