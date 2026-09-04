@@ -874,13 +874,15 @@ const handleTableTransfer = async (req: AuthedRequest, res: any) => {
 
         if (!targetOrder) {
           const dateKey = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-          const count = await tx.order.count({
-            where: { outletId, orderNumber: { startsWith: dateKey } },
+          const counter = await tx.counter.upsert({
+            where: { outletId_prefix: { outletId, prefix: dateKey } },
+            update: { sequence: { increment: 1 } },
+            create: { outletId, prefix: dateKey, sequence: 1 },
           });
           targetOrder = await tx.order.create({
             data: {
               outletId,
-              orderNumber: `${dateKey}-${String(count + 1).padStart(4, "0")}`,
+              orderNumber: `${dateKey}-${String(counter.sequence).padStart(4, "0")}`,
               orderType: sourceOrder.orderType,
               status: sourceOrder.status,
               business_date: sourceOrder.business_date,

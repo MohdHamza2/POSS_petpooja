@@ -1211,3 +1211,14 @@ model InventoryWastageLog {
   @@map("inventory_wastage_log")
 }
 
+model Counter {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  outletId  String   @map("outlet_id") @db.Uuid
+  prefix    String   @db.VarChar(50)
+  sequence  Int      @default(0)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([outletId, prefix], map: "uq_counter_outlet_prefix")
+  @@map("counters")
+}

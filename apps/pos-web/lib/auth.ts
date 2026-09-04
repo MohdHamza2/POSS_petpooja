@@ -20,7 +20,7 @@ export function getWsBase(): string {
   return process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:4001/ws";
 }
 
-export const API_BASE = "http://localhost:4001";
+export const API_BASE = getApiBase();
 export const WS_BASE = "ws://localhost:4001/ws";
 export const STORAGE_KEY = "kapmeta_pos_session";
 

@@ -338,7 +338,7 @@ router.post(["/webhooks/:channel", "/webhooks/swiggy", "/webhooks/zomato"], asyn
       return;
     }
 
-    const { externalOrderId, externalEventId, customer, items } = req.body;
+    const { externalOrderId, externalEventId, customer, items, externalOutletId } = req.body;
 
     if (!externalOrderId) {
       res.status(400).json({ error: "externalOrderId is required" });
@@ -366,12 +366,20 @@ router.post(["/webhooks/:channel", "/webhooks/swiggy", "/webhooks/zomato"], asyn
     }
 
     // 2. Resolve target outlet
-    const targetOutlet = req.body.outletId
-      ? await prisma.outlet.findUnique({ where: { id: req.body.outletId } })
-      : await prisma.outlet.findFirst();
+    let targetOutlet;
+    if (externalOutletId) {
+      const account = await prisma.channelAccount.findFirst({
+        where: { channel: channelParam, externalOutletId, is_active: true }
+      });
+      if (account) {
+        targetOutlet = await prisma.outlet.findUnique({ where: { id: account.outletId } });
+      }
+    } else if (req.body.outletId) {
+      targetOutlet = await prisma.outlet.findUnique({ where: { id: req.body.outletId } });
+    }
 
     if (!targetOutlet) {
-      res.status(404).json({ error: "Outlet not found" });
+      res.status(404).json({ error: "Outlet not mapped or not found" });
       return;
     }
 
@@ -385,32 +393,52 @@ router.post(["/webhooks/:channel", "/webhooks/swiggy", "/webhooks/zomato"], asyn
       return;
     }
 
-    // 3. Resolve Menu Items
+    // 3. Resolve Menu Items (Quarantine unknown items)
     const rawItems = Array.isArray(items) ? items : [];
     const outletMenuItems = await prisma.menuItem.findMany({ where: { outletId } });
-    const defaultItem = outletMenuItems[0];
+    
+    // Auto-create an "Unknown Aggregator Item" if needed
+    let unknownItemQuarantine = outletMenuItems.find(m => m.name === "Unknown Aggregator Item");
+    if (!unknownItemQuarantine) {
+      const defaultCategory = await prisma.category.findFirst({ where: { outletId } });
+      if (defaultCategory) {
+        unknownItemQuarantine = await prisma.menuItem.create({
+          data: {
+            outletId,
+            categoryId: defaultCategory.id,
+            name: "Unknown Aggregator Item",
+            price: 0,
+            description: "Auto-generated for unmapped aggregator items",
+            isActive: true,
+            isVeg: true,
+            taxRate: 0
+          }
+        });
+        outletMenuItems.push(unknownItemQuarantine);
+      }
+    }
 
     const lines = rawItems.map((it: any) => {
       const matched = outletMenuItems.find(
         (m) => m.name.toLowerCase() === (it.name || "").toLowerCase()
-      ) || defaultItem;
+      ) || unknownItemQuarantine;
 
       return {
-        menuItemId: matched?.id || defaultItem?.id,
+        menuItemId: matched?.id,
         quantity: Number(it.quantity || 1),
         unitPriceMinor: Number(it.priceMinor || (matched ? Number(matched.price) * 100 : 0)),
         name: it.name || matched?.name || "Aggregator Item",
-        taxRatePercent: Number(matched?.taxRate ?? defaultItem?.taxRate ?? 0),
+        taxRatePercent: Number(matched?.taxRate ?? 0),
       };
     }).filter((l) => l.menuItemId);
 
-    if (lines.length === 0 && defaultItem) {
+    if (lines.length === 0 && unknownItemQuarantine) {
       lines.push({
-        menuItemId: defaultItem.id,
+        menuItemId: unknownItemQuarantine.id,
         quantity: 1,
-        unitPriceMinor: Number(defaultItem.price) * 100,
-        name: defaultItem.name,
-        taxRatePercent: Number(defaultItem.taxRate ?? 0),
+        unitPriceMinor: 0,
+        name: unknownItemQuarantine.name,
+        taxRatePercent: 0,
       });
     }
 

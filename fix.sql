@@ -1,1 +1,1 @@
-ALTER TABLE orders ADD COLUMN idempotency_key TEXT; ALTER TABLE orders ADD CONSTRAINT uq_orders_outlet_idempotency UNIQUE (outlet_id, idempotency_key);
+CREATE TABLE counters (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), outlet_id UUID NOT NULL, prefix VARCHAR(50) NOT NULL, sequence INT NOT NULL DEFAULT 0, created_at TIMESTAMPTZ(6) NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ(6) NOT NULL DEFAULT now(), CONSTRAINT uq_counter_outlet_prefix UNIQUE (outlet_id, prefix));

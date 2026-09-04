@@ -1,13 +1,14 @@
 import React, { useEffect, useState, useMemo } from "react";
 import Head from "next/head";
 import { useRouter } from "next/router";
+import { getApiBase } from "../../lib/auth";
 
 // This page is deliberately public / unauthenticated — a customer scans a QR
 // code at their table and lands here with no login. It never imports
 // lib/auth or uses authedFetch; it only talks to the PUBLIC endpoints under
 // apps/api/src/routes/public-order.ts.
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:4001";
+const API_BASE = getApiBase();
 
 interface MenuItemApi {
   id: string;
