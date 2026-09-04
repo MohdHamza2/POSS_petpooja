@@ -181,7 +181,7 @@ inventoryRouter.post("/stock/deduct", requireAuth, requirePermission("inventory.
 });
 
 // POST /wastage
-inventoryRouter.post("/wastage", requireAuth, requirePermission("inventory.stock.deduct"), async (req: AuthedRequest, res) => {
+inventoryRouter.post("/wastage", requireAuth, requirePermission("inventory.write"), async (req: AuthedRequest, res) => {
   try {
     const { items, reason, notes } = req.body;
     const outletId = req.auth!.outletId;
@@ -191,27 +191,29 @@ inventoryRouter.post("/wastage", requireAuth, requirePermission("inventory.stock
       return res.status(400).json({ error: "items must be an array" });
     }
 
-    for (const item of items) {
-      const { ingredientId, quantityLost } = item;
-      const ingredient = await (prisma as any).ingredients.findUnique({ where: { id: ingredientId } });
-      if (ingredient) {
-        const newStock = Number(ingredient.current_stock_qty) - Number(quantityLost);
-        await (prisma as any).ingredients.update({
-          where: { id: ingredientId },
-          data: { current_stock_qty: newStock }
-        });
-        
-        await prisma.inventoryWastageLog.create({
-          data: {
-            outletId,
-            ingredientId,
-            quantity: Number(quantityLost),
-            reason: reason || "Unknown",
-            loggedBy: userId
-          }
-        });
+    await prisma.$transaction(async (tx) => {
+      for (const item of items) {
+        const { ingredientId, quantityLost } = item;
+        const ingredient = await (tx as any).ingredients.findUnique({ where: { id: ingredientId } });
+        if (ingredient) {
+          const newStock = Number(ingredient.current_stock_qty) - Number(quantityLost);
+          await (tx as any).ingredients.update({
+            where: { id: ingredientId },
+            data: { current_stock_qty: newStock }
+          });
+          
+          await tx.inventoryWastageLog.create({
+            data: {
+              outletId,
+              ingredientId,
+              quantity: Number(quantityLost),
+              reason: reason || "Unknown",
+              loggedBy: userId
+            }
+          });
+        }
       }
-    }
+    });
     res.status(201).json({ success: true });
   } catch (err: any) {
     console.error("Error in wastage:", err);
@@ -708,70 +710,7 @@ inventoryRouter.get("/availability/export", requireAuth, requirePermission("inve
   }
 });
 
-// POST /inventory/wastage - Log ingredient wastage/spoilage
-inventoryRouter.post("/wastage", requireAuth, requirePermission("inventory.write"), async (req: AuthedRequest, res) => {
-  const { ingredientId, quantity, reason } = req.body;
 
-  if (!ingredientId || quantity === undefined || !reason) {
-    return res.status(400).json({ error: "Missing ingredientId, quantity, or reason" });
-  }
-
-  try {
-    const outletId = req.auth!.outletId;
-    const userId = req.auth!.userId;
-
-    const existing = await prisma.ingredients.findFirst({
-      where: { id: ingredientId, outlet_id: outletId },
-    });
-    if (!existing) {
-      return res.status(404).json({ error: "Ingredient not found" });
-    }
-
-    const newStock = Number(existing.current_stock_qty) - Number(quantity);
-
-    await prisma.$transaction(async (tx) => {
-      // 1. Deduct stock
-      await tx.ingredients.update({
-        where: { id: ingredientId },
-        data: {
-          current_stock_qty: newStock,
-          updated_at: new Date(),
-          updated_by: userId,
-        },
-      });
-
-      // 2. Log to InventoryWastageLog
-      const log = await (tx as any).inventoryWastageLog.create({
-        data: {
-          outletId,
-          ingredientId,
-          quantity: Number(quantity),
-          reason,
-          loggedBy: userId,
-        },
-      });
-
-      // 3. Write Audit Log
-      await tx.auditLog.create({
-        data: {
-          outletId,
-          actor_id: userId,
-          action: "CREATE",
-          entityType: "INVENTORY_WASTAGE",
-          entityId: log.id,
-          beforeState: { currentStock: Number(existing.current_stock_qty) },
-          afterState: { currentStock: newStock, wastageAmount: Number(quantity), reason },
-          createdAt: new Date(),
-        },
-      });
-    });
-
-    res.status(200).json({ success: true, currentStock: newStock, message: "Wastage logged successfully" });
-  } catch (error: any) {
-    console.error("Error logging wastage:", error);
-    res.status(500).json({ error: error.message });
-  }
-});
 
 // POST /inventory/purchase-orders/:id/pay - Pay a vendor for a purchase order
 inventoryRouter.post("/purchase-orders/:id/pay", requireAuth, requirePermission("inventory.write"), async (req: AuthedRequest, res) => {

@@ -128,10 +128,11 @@ async function writeInvoicesForPayments(
 }
 
 export async function settleOrderCommand(
-  prisma: PrismaClient,
+  basePrisma: PrismaClient,
   input: SettleOrderInput
 ): Promise<SettleOrderResult> {
-  const { outletId, orderId, userId } = input;
+  return await basePrisma.$transaction(async (prisma: any) => {
+    const { outletId, orderId, userId } = input;
   const orderRepo = new PrismaOrderRepository(prisma);
 
   const order = await prisma.order.findUnique({
@@ -403,4 +404,5 @@ export async function settleOrderCommand(
     invoiceNumbers: invoices.map((inv) => inv.invoiceNumber),
     alreadySettled: false,
   };
+  }, { maxWait: 15000, timeout: 30000 });
 }

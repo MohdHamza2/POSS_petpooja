@@ -284,11 +284,13 @@ model Order {
   promisedAt          DateTime?    @map("promised_at") @db.Timestamptz(6)
   depositMinor        BigInt?      @default(0) @map("deposit_minor")
   advanceStatus       String?      @map("advance_status")
+  idempotencyKey      String?      @map("idempotency_key")
   orderItems          OrderItem[]
   kotTickets          KOTTicket[]
   invoices            Invoice[]
 
   @@unique([outletId, orderNumber], map: "uq_orders_outlet_number")
+  @@unique([outletId, idempotencyKey], map: "uq_orders_outlet_idempotency")
   @@index([customerId], map: "idx_orders_customer")
   @@index([outletId], map: "idx_orders_outlet")
   @@index([outletId, status, business_date], map: "idx_orders_outlet_status_date")
