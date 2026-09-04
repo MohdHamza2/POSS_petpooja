@@ -61,9 +61,6 @@ const handleUpdateOutletStatus = async (req: AuthedRequest, res: any) => {
     }).catch(err => console.error('Background task error:', err?.message || err));
 
     res.status(200).json(toClientStatus(status));
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'S4',location:'settings.ts:store-status',message:'store/channel pause written',data:{isOnline:status.isOnline,dineInActive:status.dineInActive,deliveryActive:status.deliveryActive,pickupActive:status.pickupActive,patch,gated:'integration.manage'},timestamp:Date.now(),runId:'sec-auth'})}).catch(()=>{});
-    // #endregion
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "internal error" });

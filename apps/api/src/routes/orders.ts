@@ -64,9 +64,6 @@ ordersRouter.get("/orders", requireAuth, async (req: AuthedRequest, res) => {
 
     const orders = await listOrders(outletId, filter, orderRepo);
     const total = await orderRepo.countOrders(outletId, filter);
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'L1',location:'orders.ts:GET /orders',message:'list orders window',data:{view:viewKey||null,orderType:filter.orderType||null,defaultedWindow,from:filter.fromDate?filter.fromDate.toISOString():null,to:filter.toDate?filter.toDate.toISOString():null,count:Array.isArray(orders)?orders.length:null,total,sample:(Array.isArray(orders)?orders:[]).slice(0,3).map((o:any)=>({n:o.orderNumber,s:o.status,t:o.orderType,c:o.createdAt}))},timestamp:Date.now(),runId:'leftover-post'})}).catch(()=>{});
-    // #endregion
     res.setHeader("X-Total-Count", String(total));
     res.setHeader("Access-Control-Expose-Headers", "X-Total-Count");
     res.status(200).json(orders);
@@ -118,9 +115,6 @@ ordersRouter.post("/orders", requireAuth, async (req: AuthedRequest, res) => {
 
     const paused = channelPausedReason(ops, requestedType);
     if (paused) {
-      // #region agent log
-      fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'CH1',location:'orders.ts:POST /orders',message:'channel pause blocked create',data:{requestedType,paused,isHold,isOnline:ops.isOnline,dineInActive:ops.dineInActive,deliveryActive:ops.deliveryActive,pickupActive:ops.pickupActive},timestamp:Date.now(),runId:'channel-pause'})}).catch(()=>{});
-      // #endregion
       return res.status(409).json({ error: paused, code: "CHANNEL_PAUSED" });
     }
     const isOffFloor = requestedType === "DELIVERY" || requestedType === "PICKUP" || isAdvance;
@@ -150,9 +144,6 @@ ordersRouter.post("/orders", requireAuth, async (req: AuthedRequest, res) => {
       }
     }
 
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'D1',location:'orders.ts:POST /orders',message:'mode vs table bind',data:{requestedType,isOffFloor,isAdvance,isHold,hasTableId:Boolean(diningTableId),tableNumber:body.tableNumber||null},timestamp:Date.now(),runId:'modes'})}).catch(()=>{});
-    // #endregion
 
     if (diningTableId && !isHold && !isOffFloor) {
       const liveOnAnchor = await findLiveOrdersOnTables(prisma, outletId, [diningTableId]);
@@ -238,9 +229,6 @@ ordersRouter.post("/orders", requireAuth, async (req: AuthedRequest, res) => {
           table_number: body.tableNumber ? String(body.tableNumber) : undefined,
         },
       });
-      // #region agent log
-      fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'A',location:'orders.ts:POST HOLD',message:'held draft created',data:{orderId:result.id,diningTableId:diningTableId||null,lineCount:lines.length,occupied:false},timestamp:Date.now(),runId:'wave3'})}).catch(()=>{});
-      // #endregion
     }
     // If KOT creation requested (action: "KOT" or status: "ACTIVE" or "KOT_CREATED"):
     else if (body.action === "KOT" || body.status === "ACTIVE" || body.status === "KOT_CREATED") {
@@ -254,15 +242,9 @@ ordersRouter.post("/orders", requireAuth, async (req: AuthedRequest, res) => {
         await occupyMergeMembers(prisma, outletId, diningTableId);
         await stampOrderMergeLabel(prisma, outletId, result.id, diningTableId);
       }
-      // #region agent log
-      fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'W1',location:'orders.ts:POST KOT',message:'waiter/pos KOT created and table occupied',data:{orderId:result.id,orderNumber:(result as any).orderNumber||null,diningTableId:diningTableId||null,tableNumber:body.tableNumber||null,lineCount:lines.length,action:body.action||null,status:body.status||null},timestamp:Date.now(),runId:'waiter-e2e'})}).catch(()=>{});
-      // #endregion
     }
     // If Bill / Immediate Settlement requested (action: "BILL" or isPaid: true or status: "COMPLETED"):
     else if (body.action === "BILL" || body.isPaid || body.status === "COMPLETED") {
-      // #region agent log
-      fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb",{method:"POST",headers:{"Content-Type":"application/json","X-Debug-Session-Id":"9c675b"},body:JSON.stringify({sessionId:"9c675b",hypothesisId:"DUE2",location:"orders.ts:POST BILL",message:"create-and-settle BILL branch",data:{action:body.action||null,isPaid:body.isPaid===true,paymentMethod:body.paymentMethod||null,orderId:result.id},timestamp:Date.now(),runId:"due-print"})}).catch(()=>{});
-      // #endregion
       await transitionOrder(result.id, "CONFIRMED", orderRepo, req.auth!.userId);
       await onOrderConfirmed(result.id, prisma);
       const billed = await settleOrderCommand(prisma, {
@@ -415,9 +397,6 @@ ordersRouter.get("/orders/live", requireAuth, async (req: AuthedRequest, res) =>
         table_number: o.table_number || (o.orderType === "DELIVERY" ? "DELIVERY" : o.orderType === "PICKUP" ? "PICKUP" : o.table_number),
       });
     });
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'L2',location:'orders.ts:GET /live',message:'live off-floor scoped to business day',data:{count:scoped.length,rawCount:activeOrders.length,kind:kind||'all',deliveryCount:scoped.filter((o)=>o.orderType==='DELIVERY').length,directDelivery:scoped.filter((o)=>o.orderType==='DELIVERY'&&!/^(SWIGGY|ZOMATO)-/i.test(o.orderNumber||'')).map((o)=>o.orderNumber),dayStart:dayStart.toISOString(),sample:scoped.slice(0,5).map((o)=>({n:o.orderNumber,status:o.status,type:o.orderType,createdAt:o.createdAt.toISOString()}))},timestamp:Date.now(),runId:'leftover-post'})}).catch(()=>{});
-    // #endregion
 
     res.status(200).json(payload);
   } catch (err: any) {
@@ -464,9 +443,6 @@ ordersRouter.get("/orders/held", requireAuth, async (req: AuthedRequest, res) =>
         })),
       };
     });
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'A',location:'orders.ts:GET /held',message:'held list',data:{count:payload.length},timestamp:Date.now(),runId:'wave3'})}).catch(()=>{});
-    // #endregion
     res.status(200).json(payload);
   } catch (err: any) {
     console.error("Error fetching held orders:", err);
@@ -598,9 +574,6 @@ ordersRouter.patch("/orders/:id/status", requireAuth, async (req: AuthedRequest,
       }
     }
 
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'S3',location:'orders.ts:PATCH /orders/:id/status',message:'order status kot cascade',data:{orderId,authOutletId:outletId,orderOutletMatch:order.outletId===outletId,from:order.status,mappedTarget,permAction,stepOk:stepResult.ok,applied:stepResult.applied,kotTarget:kotCascade&&kotCascade.target,kotCount:kotCascade?kotCascade.ticketIds.length:0},timestamp:Date.now(),runId:'sec-auth'})}).catch(()=>{});
-    // #endregion
 
     import("../websockets").then(({ broadcast }) => {
       broadcast("order.status_updated", { orderId, status: mappedTarget, tableId: order.diningTableId });
@@ -670,9 +643,6 @@ const handleRecordPayment = async (req: AuthedRequest, res: any) => {
       where: { id: req.params.id },
     });
 
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'A',location:'orders.ts:handleRecordPayment',message:'POST /payments after recordPayment',data:{orderId:req.params.id,method,amount:String(amountMinor),orderStatus:order?.status||null,settledAt:order?.settledAt?true:false,tableNumber:order?.table_number||null},timestamp:Date.now(),runId:'hotel-p0'})}).catch(()=>{});
-    // #endregion
 
     res.status(201).json({
       ...payment,
@@ -683,9 +653,6 @@ const handleRecordPayment = async (req: AuthedRequest, res: any) => {
     });
   } catch (err: any) {
     console.error("Error recording payment:", err);
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'P',location:'orders.ts:handleRecordPayment:catch',message:'POST /payments failed',data:{orderId:req.params.id,code:err?.code||null,partition:typeof err?.message==='string'&&err.message.includes('no partition'),msg:String(err?.message||'').slice(0,180)},timestamp:Date.now(),runId:'t05-settle'})}).catch(()=>{});
-    // #endregion
     res.status(400).json({ error: err.message || "Failed to record payment" });
   }
 };
@@ -711,9 +678,6 @@ ordersRouter.post("/orders/:id/items", requireAuth, async (req: AuthedRequest, r
     const itemOps = await loadOutletOpsStatus(outletId);
     const itemPaused = channelPausedReason(itemOps, normalizeOpsOrderType(existing.orderType));
     if (itemPaused) {
-      // #region agent log
-      fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'CH3',location:'orders.ts:POST /orders/:id/items',message:'channel pause blocked add items',data:{orderId:req.params.id,orderType:existing.orderType,paused:itemPaused},timestamp:Date.now(),runId:'channel-pause'})}).catch(()=>{});
-      // #endregion
       return res.status(409).json({ error: itemPaused, code: "CHANNEL_PAUSED" });
     }
 
@@ -825,9 +789,6 @@ ordersRouter.post("/orders/:id/settle", requireAuth, async (req: AuthedRequest, 
       payments: req.body.payments,
       customerId: req.body.customerId,
     });
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'DUE1',location:'orders.ts:POST /settle',message:'settle response',data:{orderId:req.params.id,alreadySettled:result.alreadySettled,status:result.status,paymentMethod:req.body.paymentMethod||null,invoiceNumber:result.invoiceNumber,invoiceNumbers:result.invoiceNumbers},timestamp:Date.now(),runId:'due-print'})}).catch(()=>{});
-    // #endregion
     res.status(200).json(result);
   } catch (err: any) {
     if (err?.message === "ALREADY_SETTLED" || err?.code === "ALREADY_SETTLED") {
@@ -851,9 +812,6 @@ ordersRouter.post("/orders/:id/hold", requireAuth, async (req: AuthedRequest, re
       where: { id: order.id },
       data: { advanceStatus: "HELD" },
     });
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'A',location:'orders.ts:POST /hold',message:'order parked',data:{orderId:updated.id,fromStatus:order.status},timestamp:Date.now(),runId:'wave3'})}).catch(()=>{});
-    // #endregion
     res.status(200).json({ ok: true, orderId: updated.id, status: updated.status, advanceStatus: updated.advanceStatus });
   } catch (err: any) {
     res.status(500).json({ error: err.message || "Failed to hold order" });
@@ -873,9 +831,6 @@ ordersRouter.post("/orders/:id/fire-advance", requireAuth, async (req: AuthedReq
     const fireOps = await loadOutletOpsStatus(outletId);
     const firePaused = channelPausedReason(fireOps, normalizeOpsOrderType(existing.orderType));
     if (firePaused) {
-      // #region agent log
-      fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'CH2',location:'orders.ts:fire-advance',message:'channel pause blocked fire-advance',data:{orderId,orderType:existing.orderType,paused:firePaused},timestamp:Date.now(),runId:'channel-pause'})}).catch(()=>{});
-      // #endregion
       return res.status(409).json({ error: firePaused, code: "CHANNEL_PAUSED" });
     }
     await prisma.order.update({
@@ -885,9 +840,6 @@ ordersRouter.post("/orders/:id/fire-advance", requireAuth, async (req: AuthedReq
     await transitionOrder(orderId, "CONFIRMED", orderRepo, req.auth!.userId).catch((err: any) => console.error('Background task error:', err?.message || err));
     await transitionOrder(orderId, "KOT_CREATED", orderRepo, req.auth!.userId).catch((err: any) => console.error('Background task error:', err?.message || err));
     await onOrderConfirmed(orderId, prisma);
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'D1',location:'orders.ts:fire-advance',message:'advance fired without occupying table',data:{orderId,orderType:existing.orderType,diningTableId:existing.diningTableId||null,occupied:false},timestamp:Date.now(),runId:'modes'})}).catch(()=>{});
-    // #endregion
 
     res.status(200).json({ ok: true, orderId, status: "KOT_CREATED" });
   } catch (err: any) {
@@ -925,9 +877,6 @@ ordersRouter.post("/orders/:id/cancel", requireAuth, async (req: AuthedRequest, 
       where: { orderId, status: { not: "CANCELLED" } },
       data: { status: "CANCELLED", updatedAt: new Date() },
     });
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'L1',location:'orders.ts:cancel',message:'cancel also voids KOT tickets',data:{orderId,kotsCancelled:kotCancel.count},timestamp:Date.now(),runId:'tax-fix'})}).catch(()=>{});
-    // #endregion
 
     const dissolved = order.diningTableId
       ? await dissolveMergeGroupForTable(prisma, order.outletId, order.diningTableId)
@@ -1045,9 +994,6 @@ ordersRouter.post("/orders/:id/print", requireAuth, async (req: AuthedRequest, r
       });
     }
 
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'L4',location:'orders.ts:POST /orders/:id/print',message:'print job accepted',data:{orderId,documentType,orderStatus:order.status,copies,auditWritten:documentType==='bill',hasPrinterName:Boolean(settings&&settings.printer_name),itemCount:order.orderItems.length},timestamp:Date.now(),runId:'leftover-post'})}).catch(()=>{});
-    // #endregion
 
     import("../websockets").then(({ broadcast }) => {
       broadcast("order.print_requested", {

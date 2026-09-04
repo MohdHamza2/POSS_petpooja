@@ -79,9 +79,6 @@ async function cascadeKitchenOnSettle(
   userId: string
 ): Promise<boolean> {
   const kotCascade = await cascadeKotTicketsTo(prisma, orderId, "SERVED", userId);
-  // #region agent log
-  fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'OCC3',location:'settle-order.ts:kot-cascade',message:'settle cascaded kitchen tickets',data:{orderId,kotTarget:kotCascade.target,kotCount:kotCascade.ticketIds.length,from:kotCascade.from},timestamp:Date.now(),runId:'occ-post'})}).catch(()=>{});
-  // #endregion
   return orderHasUnservedKot(prisma, orderId);
 }
 
@@ -155,9 +152,6 @@ export async function settleOrderCommand(
     throw err;
   }
   if (order.status === "COMPLETED") {
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'B',location:'settle-order.ts:alreadySettled',message:'settle hit COMPLETED branch',data:{orderId,settledAt:order.settledAt?true:false,hasInvoice:existingInvoices.length>0,invoiceCount:existingInvoices.length,tableId:order.diningTableId||null,tableNumber:order.table_number||null},timestamp:Date.now(),runId:'post-fix'})}).catch(()=>{});
-    // #endregion
 
     const existingPays = await prisma.payment.findMany({
       where: { orderId, outletId, status: "CAPTURED" },
@@ -271,9 +265,6 @@ export async function settleOrderCommand(
     if (chunk <= 0n) continue;
     await orderRepo.recordPayment(outletId, orderId, chunk, p.method, userId);
     remainingToRecord += chunk;
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'B',location:'settle-order.ts:recordChunk',message:'settle recording payment chunk',data:{orderId,method:p.method,chunk:chunk.toString(),remainingToRecord:remainingToRecord.toString(),grandTotal:order.grandTotal.toString()},timestamp:Date.now(),runId:'hotel-p0'})}).catch(()=>{});
-    // #endregion
     if (String(p.method).toUpperCase() === "CASH") {
       const activeDrawer = await prisma.cash_drawer_sessions.findFirst({
         where: { outlet_id: outletId, status: "OPEN" },
@@ -320,10 +311,6 @@ export async function settleOrderCommand(
   const invoice = invoices[0];
   const invoiceSum = invoices.reduce((s, inv) => s + inv.amountMinor, 0n);
   const invoiceTaxSum = invoices.reduce((s, inv) => s + inv.taxAmountMinor, 0n);
-  // #region agent log
-  fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'A',location:'settle-order.ts:invoice-write',message:'invoice vs payments after settle',data:{orderId,paymentInputCount:splitPays.length,invoiceCount:invoices.length,invoiceNumbers:invoices.map((inv) => inv.invoiceNumber),invoiceAmounts:invoices.map((inv) => inv.amountMinor.toString()),grandTotal:order.grandTotal.toString()},timestamp:Date.now(),runId:'split-post'})}).catch(()=>{});
-  fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'T2',location:'settle-order.ts:sync-totals',message:'sync order totals to invoices',data:{orderId,grandBefore:order.grandTotal.toString(),invoiceSum:invoiceSum.toString(),invoiceTaxSum:invoiceTaxSum.toString(),willSyncTotals:invoiceSum!==order.grandTotal},timestamp:Date.now(),runId:'tax-fix'})}).catch(()=>{});
-  // #endregion
 
   await prisma.order.update({
     where: { id: orderId },
@@ -350,18 +337,12 @@ export async function settleOrderCommand(
   }
 
   const bom = await deductBomStockForOrder(orderId, outletId, prisma, userId, "ORDER_SETTLED");
-  // #region agent log
-  fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'H',location:'settle-order.ts:loyalty',message:'loyalty branch',data:{orderId,hasCustomerId:Boolean(order.customerId),payAmount:payAmount.toString(),grandTotal:order.grandTotal.toString(),bomDeducted:bom.deductedCount,bomSkipped:bom.skippedDuplicate,paisePerPoint:null,runId:'serve-bom'},timestamp:Date.now(),runId:'serve-bom'})}).catch(()=>{});
-  // #endregion
 
   if (order.customerId) {
     const outlet = await prisma.outlet.findUnique({ where: { id: outletId } });
     const paisePerPoint = outlet?.loyaltyPaisePerPoint;
     const loyaltyBase = invoiceSum;
     const pointsEarned = paisePerPoint && paisePerPoint > 0n ? Number(loyaltyBase / paisePerPoint) : 0;
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'H',location:'settle-order.ts:loyalty-award',message:'loyalty award',data:{orderId,customerId:order.customerId,paisePerPoint:paisePerPoint!=null?paisePerPoint.toString():null,loyaltyBase:loyaltyBase.toString(),pointsEarned},timestamp:Date.now(),runId:'post-fix'})}).catch(()=>{});
-    // #endregion
     if (pointsEarned > 0) {
         await prisma.customer.update({
           where: { id: order.customerId },

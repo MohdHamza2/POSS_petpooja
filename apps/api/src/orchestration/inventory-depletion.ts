@@ -105,9 +105,6 @@ export async function deductBomStockForOrder(
       orderBy: [{ version: "desc" }, { created_at: "desc" }],
     });
 
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'A',location:'inventory-depletion.ts:recipes-for-item',message:'BOM recipes for order item',data:{orderId,menuItemId:item.menuItemId,itemName:item.item_name,recipeCount:matchingRecipes.length,ingCount:matchingRecipes.reduce((n,r)=>n+(r.recipe_ingredients||[]).length,0)},timestamp:Date.now(),runId:'post-fix'})}).catch(()=>{});
-    // #endregion
 
     const latestByMenu = new Map<string, (typeof matchingRecipes)[number]>();
     for (const recipe of matchingRecipes) {
@@ -124,9 +121,6 @@ export async function deductBomStockForOrder(
         },
         data: { is_active: false, updated_at: new Date() },
       });
-      // #region agent log
-      fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'B1',location:'inventory-depletion.ts:stale-recipes',message:'deactivated extra active recipes',data:{orderId,menuItemId:item.menuItemId,activeBefore:matchingRecipes.length,kept:keepIds.length,deactivated:deactivated.count},timestamp:Date.now(),runId:'tax-fix'})}).catch(()=>{});
-      // #endregion
     }
 
     for (const recipe of latestByMenu.values()) {
@@ -229,8 +223,5 @@ export async function deductBomStockForOrder(
   }
 
 
-  // #region agent log
-  fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'F',location:'inventory-depletion.ts:deductBomStockForOrder',message:'BOM deduct result',data:{orderId,outletId,reasonCode,itemFilter:orderItemIds?orderItemIds.length:'all',deductedCount,skippedDuplicate,detailCount:details.length,first:details[0]?{ingredientName:details[0].ingredientName,ingredientId:details[0].ingredientId,deductedQty:details[0].deductedQty,remainingStock:details[0].remainingStock,shortage:details[0].shortage}:null},timestamp:Date.now(),runId:'serve-bom'})}).catch(()=>{});
-  // #endregion
   return { deductedCount, skippedDuplicate, details };
 }

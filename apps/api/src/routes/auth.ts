@@ -181,21 +181,6 @@ router.post("/pin-login", async (req, res) => {
         outletId,
       },
     });
-    // #region agent log
-    fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-      body: JSON.stringify({
-        sessionId: "9c675b",
-        hypothesisId: "PIN-B",
-        location: "auth.ts:POST /pin-login",
-        message: "pin login issued tokens",
-        data: { userId: user.id, outletId, hasRefresh: Boolean(refreshToken) },
-        timestamp: Date.now(),
-        runId: "pin-staff",
-      }),
-    }).catch(err => console.error('Background task error:', err?.message || err));
-    // #endregion
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "internal error" });
@@ -228,9 +213,10 @@ router.post("/refresh", async (req, res) => {
   }
 });
 
-router.post("/logout", async (req, res) => {
+router.post("/logout", requireAuth, async (req, res) => {
   try {
-    const { sessionId } = req.body;
+    // Optionally take from body or req.auth.sessionId
+    const sessionId = req.body.sessionId || (req as any).auth?.sessionId;
 
     const sessionStore = new PrismaSessionStore(prisma);
     await sessionStore.revoke(sessionId);
@@ -292,21 +278,6 @@ router.get("/outlets", async (req, res) => {
   try {
     const code = typeof req.query.code === "string" ? req.query.code.trim() : "";
     if (!code) {
-      // #region agent log
-      fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-        body: JSON.stringify({
-          sessionId: "9c675b",
-          hypothesisId: "S1",
-          location: "auth.ts:GET /outlets",
-          message: "public outlet directory rejected without code",
-          data: { hasCode: false, count: 0 },
-          timestamp: Date.now(),
-          runId: "sec-auth",
-        }),
-      }).catch(err => console.error('Background task error:', err?.message || err));
-      // #endregion
       res.status(400).json({ error: "outlet code is required" });
       return;
     }
@@ -316,21 +287,6 @@ router.get("/outlets", async (req, res) => {
       orderBy: { name: "asc" },
       select: { id: true, name: true, code: true },
     });
-    // #region agent log
-    fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-      body: JSON.stringify({
-        sessionId: "9c675b",
-        hypothesisId: "S1",
-        location: "auth.ts:GET /outlets",
-        message: "public outlet lookup by code",
-        data: { hasCode: true, count: outlets.length, codes: outlets.map((o) => o.code) },
-        timestamp: Date.now(),
-        runId: "sec-auth",
-      }),
-    }).catch(err => console.error('Background task error:', err?.message || err));
-    // #endregion
     res.status(200).json(outlets);
   } catch (err) {
     console.error(err);
@@ -375,26 +331,6 @@ router.get("/pin-staff", async (req, res) => {
       role: user.userRoles[0]?.role?.name ?? "Staff",
     }));
 
-    // #region agent log
-    fetch("http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9c675b" },
-      body: JSON.stringify({
-        sessionId: "9c675b",
-        hypothesisId: "S2",
-        location: "auth.ts:GET /pin-staff",
-        message: "pin-enabled staff from DB",
-        data: {
-          outletId,
-          count: staff.length,
-          fields: staff[0] ? Object.keys(staff[0]) : [],
-          hasEmail: staff.some((s) => "email" in s),
-        },
-        timestamp: Date.now(),
-        runId: "pin-staff",
-      }),
-    }).catch(err => console.error('Background task error:', err?.message || err));
-    // #endregion
 
     res.status(200).json(staff);
   } catch (err) {

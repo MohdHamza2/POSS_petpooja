@@ -74,9 +74,6 @@ financeRouter.get("/z-report", requireAuth, requirePermission("report.read"), as
   
   try {
     const report = await zReportGenerator.generateDailyReport(req.auth!.outletId, window.businessDate);
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'Z1',location:'finance.ts:GET /z-report',message:'z-report window vs picker',data:{dateParam:dateParam||null,parsedDate:date.toISOString(),reportDate:report.date,businessDayStart:report.businessDayStart,businessDayEnd:report.businessDayEnd,invoiceCount:report.invoiceCount,grandTotal:report.grandTotal.toString(),paymentModeKeys:Object.keys(report.paymentModes||{}),tzOffsetMin:new Date().getTimezoneOffset()},timestamp:Date.now(),runId:'post-fix'})}).catch(()=>{});
-    // #endregion
     
     // convert bigints
     const paymentModesStr: Record<string, string> = {};
@@ -361,9 +358,6 @@ financeRouter.get("/cash-drawer", requireAuth, requirePermission("report.read"),
     // recomputes from ledger rows so a mid-day open cannot hide earlier cash sales.
     const expectedCashMinor =
       openingFloatMinor + cashSalesMinor - cashRefundsMinor - pettyCashTotalMinor;
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'Z3',location:'finance.ts:cash-drawer-get',message:'cash drawer expected from ledger',data:{sessionStatus:session?.status||'NONE',opening:openingFloatMinor.toString(),cashSales:cashSalesMinor.toString(),petty:pettyCashTotalMinor.toString(),expected:expectedCashMinor.toString(),sessionExpected:session?session.expected_close_balance_minor.toString():null,cashTxCount:cashPayments.length,windowStart:startOfDay.toISOString(),windowEnd:endOfDay.toISOString(),dateParam:dateParam||null,businessDate:localDateStr},timestamp:Date.now(),runId:'post-fix'})}).catch(()=>{});
-    // #endregion
 
     res.status(200).json({
       outletId,
@@ -390,7 +384,7 @@ financeRouter.get("/cash-drawer", requireAuth, requirePermission("report.read"),
 });
 
 // POST /finance/petty-cash — record a petty cash outflow
-financeRouter.post("/petty-cash", requireAuth, requirePermission("report.read"), async (req: AuthedRequest, res) => {
+financeRouter.post("/petty-cash", requireAuth, requirePermission("finance.write"), async (req: AuthedRequest, res) => {
   try {
     const outletId = req.auth!.outletId;
     const userId = req.auth!.userId;
@@ -442,9 +436,6 @@ financeRouter.post("/petty-cash", requireAuth, requirePermission("report.read"),
         category: row.category,
       });
     }).catch(err => console.error('Background task error:', err?.message || err));
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'P1',location:'finance.ts:POST petty-cash',message:'petty cash recorded and broadcast',data:{amountMinor:String(amount),category:row.category,hasOpenSession:Boolean(session)},timestamp:Date.now(),runId:'petty-shift'})}).catch(()=>{});
-    // #endregion
     res.status(201).json({
       id: row.id,
       amountMinor: String(amount),
@@ -460,7 +451,7 @@ financeRouter.post("/petty-cash", requireAuth, requirePermission("report.read"),
   }
 });
 
-financeRouter.post("/cash-drawer/open", requireAuth, requirePermission("report.read"), async (req: AuthedRequest, res) => {
+financeRouter.post("/cash-drawer/open", requireAuth, requirePermission("finance.write"), async (req: AuthedRequest, res) => {
   try {
     const outletId = req.auth!.outletId;
     const existing = await prisma.cash_drawer_sessions.findFirst({
@@ -561,12 +552,12 @@ const handleReconcileShift = async (req: AuthedRequest, res: any) => {
   }
 };
 
-financeRouter.post("/cash-drawer/reconcile", requireAuth, requirePermission("report.read"), handleReconcileShift);
-financeRouter.post("/reconcile-shift", requireAuth, requirePermission("report.read"), handleReconcileShift);
-financeRouter.post("/close-shift", requireAuth, requirePermission("report.read"), handleReconcileShift);
+financeRouter.post("/cash-drawer/reconcile", requireAuth, requirePermission("finance.write"), handleReconcileShift);
+financeRouter.post("/reconcile-shift", requireAuth, requirePermission("finance.write"), handleReconcileShift);
+financeRouter.post("/close-shift", requireAuth, requirePermission("finance.write"), handleReconcileShift);
 
 // POST /finance/card-settlement — Reconcile EDC/Card Machine batch
-financeRouter.post("/card-settlement", requireAuth, requirePermission("report.read"), async (req: AuthedRequest, res) => {
+financeRouter.post("/card-settlement", requireAuth, requirePermission("finance.write"), async (req: AuthedRequest, res) => {
   try {
     const outletId = req.auth!.outletId;
     const userId = req.auth!.userId;
@@ -623,7 +614,7 @@ financeRouter.post("/card-settlement", requireAuth, requirePermission("report.re
 import { createHash } from "crypto";
 
 // POST /finance/z-report/seal — Finalize the day and generate a tamper-proof hash
-financeRouter.post("/z-report/seal", requireAuth, requirePermission("report.read"), async (req: AuthedRequest, res) => {
+financeRouter.post("/z-report/seal", requireAuth, requirePermission("finance.write"), async (req: AuthedRequest, res) => {
   const dateParam = req.body.date as string | undefined;
   try {
     const outletId = req.auth!.outletId;

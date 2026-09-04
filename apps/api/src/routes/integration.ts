@@ -1,4 +1,5 @@
 import { Router } from "express";
+import * as crypto from "crypto";
 import { requireAuth, requirePermission, AuthedRequest } from "../middleware/require-auth";
 import { prisma } from "../prisma";
 import { encryptCredential, maskCredential } from "@kapmeta/integration";
@@ -256,9 +257,6 @@ router.get(["/channel-items", "/integration/channel-items"], requireAuth, requir
       };
     });
 
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'A',location:'integration.ts:GET channel-items',message:'channel 86 vs item_availability',data:{menuCount:menuItems.length,channelAccountCount:channelAccounts.length,offCount:items.filter((i)=>i.overallStatus==='ALL_OFF').length,onCount:items.filter((i)=>i.overallStatus==='ALL_ON').length,syntheticPos:channelAccounts.length===0},timestamp:Date.now(),runId:'86-post'})}).catch(()=>{});
-    // #endregion
     res.status(200).json(items);
   } catch (err: any) {
     console.error("Error fetching channel items:", err);
@@ -322,6 +320,24 @@ router.patch(["/channel-items/:mappingId/availability", "/integration/channel-it
 router.post(["/webhooks/:channel", "/webhooks/swiggy", "/webhooks/zomato"], async (req, res) => {
   try {
     const channelParam = (req.params.channel || (req.path.includes("swiggy") ? "SWIGGY" : "ZOMATO")).toUpperCase();
+    
+    // Verify HMAC signature
+    const signature = req.headers["x-webhook-signature"] || req.headers["x-hub-signature"];
+    if (!signature) {
+      res.status(401).json({ error: "Missing signature" });
+      return;
+    }
+    const secret = process.env[`${channelParam}_WEBHOOK_SECRET`] || "default_secret";
+    const expectedSignature = crypto
+      .createHmac("sha256", secret)
+      .update(JSON.stringify(req.body))
+      .digest("hex");
+      
+    if (signature !== expectedSignature) {
+      res.status(401).json({ error: "Invalid signature" });
+      return;
+    }
+
     const { externalOrderId, externalEventId, customer, items } = req.body;
 
     if (!externalOrderId) {
@@ -364,9 +380,6 @@ router.post(["/webhooks/:channel", "/webhooks/swiggy", "/webhooks/zomato"], asyn
     const ops = await loadOutletOpsStatus(outletId);
     const pausedReason = channelPausedReason(ops, "DELIVERY");
     const paused = Boolean(pausedReason);
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'CH1',location:'integration.ts:webhook-pause',message:'aggregator ingest pause check',data:{outletId,isOnline:ops.isOnline,deliveryActive:ops.deliveryActive,blocked:paused,reason:pausedReason,externalOrderId},timestamp:Date.now(),runId:'channel-pause'})}).catch(()=>{});
-    // #endregion
     if (paused) {
       res.status(409).json({ error: pausedReason, code: "CHANNEL_PAUSED" });
       return;
@@ -410,9 +423,6 @@ router.post(["/webhooks/:channel", "/webhooks/swiggy", "/webhooks/zomato"], asyn
     }
     const grandTotal = subtotal;
     const additiveLie = subtotal + (subtotal * 5n) / 100n;
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'T1',location:'integration.ts:webhook-totals',message:'aggregator inclusive totals',data:{subtotal:String(subtotal),tax:String(tax),grandTotal:String(grandTotal),additiveWouldBe:String(additiveLie),lineCount:lines.length,rates:lines.map((l)=>l.taxRatePercent),mode:'inclusive'},timestamp:Date.now(),runId:'tax-fix'})}).catch(()=>{});
-    // #endregion
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const customerId = await resolveWebhookCustomer(outletId, customer);
@@ -444,9 +454,6 @@ router.post(["/webhooks/:channel", "/webhooks/swiggy", "/webhooks/zomato"], asyn
         },
       },
     });
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'AG3',location:'integration.ts:webhook-create',message:'aggregator order bound without table',data:{orderId:createdOrder.id,orderNumber:createdOrder.orderNumber,diningTableId:createdOrder.diningTableId,tableNumber:createdOrder.table_number,customerId:createdOrder.customerId,channel:channelParam},timestamp:Date.now(),runId:'agg-post'})}).catch(()=>{});
-    // #endregion
 
     // 5. Generate Station KOTs & Order Status History
     await (prisma.orderStatusHistory as any).create({

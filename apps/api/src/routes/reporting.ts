@@ -47,9 +47,6 @@ router.get("/sales-summary", requireAuth, requirePermission("report.read"), asyn
 
     const repo = new PrismaReportingRepository(prisma);
     const summary = await getSalesSummary(outletId, range, repo);
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'T3',location:'reporting.ts:GET /sales-summary',message:'day net from order grandTotal',data:{from:range.fromDate.toISOString(),to:range.toDate.toISOString(),net:String(summary.netSalesMinor),orderCount:summary.orderCount},timestamp:Date.now(),runId:'tax-fix'})}).catch(()=>{});
-    // #endregion
 
     res.status(200).json({
       ...summary,
@@ -73,9 +70,6 @@ router.get("/tax-breakdown", requireAuth, requirePermission("report.read"), asyn
 
     const repo = new PrismaReportingRepository(prisma);
     const taxBreakdown = await getTaxBreakdown(outletId, range, repo);
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'GST1',location:'reporting.ts:GET /tax-breakdown',message:'GST taxable vs collected',data:{from:range?.fromDate?.toISOString(),to:range?.toDate?.toISOString(),taxable:String(taxBreakdown.totalTaxableSalesMinor),tax:String(taxBreakdown.totalTaxCollectedMinor),orderCount:taxBreakdown.orderCount,effective:taxBreakdown.effectiveTaxRatePercent},timestamp:Date.now(),runId:'gst-post'})}).catch(()=>{});
-    // #endregion
 
     res.status(200).json({
       ...taxBreakdown,
@@ -140,9 +134,6 @@ router.get("/payment-breakdown", requireAuth, requirePermission("report.read"), 
 
     const repo = new PrismaReportingRepository(prisma);
     const breakdown = await getPaymentBreakdown(outletId, range, repo);
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'P1',location:'reporting.ts:GET /payment-breakdown',message:'payment breakdown settle-window',data:{from:range.fromDate.toISOString(),to:range.toDate.toISOString(),total:String(breakdown.totalAmountMinor),methods:breakdown.methods.map((m)=>({method:m.method,count:m.count,amount:String(m.amountMinor)}))},timestamp:Date.now(),runId:'pay-post'})}).catch(()=>{});
-    // #endregion
 
     res.status(200).json({
       ...breakdown,
@@ -188,9 +179,6 @@ router.get("/table-turnaround", requireAuth, requirePermission("report.read"), a
 
     const repo = new PrismaReportingRepository(prisma);
     const tta = await getTableTurnaroundAverage(outletId, range, repo);
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'A',location:'reporting.ts:GET /table-turnaround',message:'TTA average vs range',data:{from:range.fromDate.toISOString(),to:range.toDate.toISOString(),averageMinutes:tta.averageMinutes,qualifyingOrderCount:tta.qualifyingOrderCount},timestamp:Date.now(),runId:'tta-post'})}).catch(()=>{});
-    // #endregion
     res.status(200).json(tta);
   } catch (err) {
     console.error(err);
@@ -323,9 +311,6 @@ router.get("/invoices", requireAuth, requirePermission("report.read"), async (re
       paymentsByOrder.get(p.orderId)!.push(p);
     }
 
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'D',location:'reporting.ts:GET /invoices',message:'invoice list one row per invoice',data:{orderCount:invoiceOrders.length,dbInvoiceCount:dbInvoices.length,uniqueInvoiceOrderIds:invoiceOrderIds.length},timestamp:Date.now(),runId:'split-post'})}).catch(()=>{});
-    // #endregion
 
     const invoices = dbInvoices.map((inv) => {
       const o = orderById.get(inv.orderId);

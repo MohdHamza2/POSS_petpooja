@@ -102,9 +102,6 @@ router.get("/kot", requireAuth, requirePermission("kot.read"), async (req: Authe
       .filter((id: string | null | undefined): id is string => Boolean(id));
     const labels = await mergeGroupLabelMap(prisma, req.auth!.outletId, groupIds);
 
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'L3',location:'kitchen.ts:GET /kot',message:'kitchen tickets after completed-parent filter',data:{count:tickets.length,sample:tickets.slice(0,8).map((t)=>({n:t.ticketNumber,kot:t.status,orderStatus:(t.order as any)?.status,orderType:t.order?.orderType}))},timestamp:Date.now(),runId:'leftover-post'})}).catch(()=>{});
-    // #endregion
 
     res.status(200).json(
       tickets.map((t) => ({
@@ -237,9 +234,6 @@ router.patch("/kot/:kotTicketId/status", requireAuth, async (req: AuthedRequest,
             servedItemIds
           );
         }
-        // #region agent log
-        fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'I',location:'kitchen.ts:PATCH kot SERVED',message:'KDS serve-time BOM',data:{kotTicketId,orderId:ticket.orderId,orderType:ticket.order&&ticket.order.orderType,servedItemIds,tableId:ticket.order&&ticket.order.diningTableId},timestamp:Date.now(),runId:'serve-bom'})}).catch(()=>{});
-        // #endregion
         const remaining = others.filter(
           (k) => k.status !== "CANCELLED" && k.status !== "SERVED"
         );
@@ -262,13 +256,7 @@ router.patch("/kot/:kotTicketId/status", requireAuth, async (req: AuthedRequest,
           orderTargetStatus as OrderStatus,
           req.auth!.userId
         );
-        // #region agent log
-        fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'AG4',location:'kitchen.ts:stepOrderTo',message:'KOT cascade walked legal order path',data:{orderId:ticket.orderId,target:orderTargetStatus,ok:stepResult.ok,from:stepResult.from,applied:stepResult.applied,tableId:ticket.order&&ticket.order.diningTableId},timestamp:Date.now(),runId:'agg-post'})}).catch(()=>{});
-        // #endregion
       }
-      // #region agent log
-      fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'LNE',location:'kitchen.ts:PATCH kot status',message:'KDS status cascade',data:{kotTicketId,toStatus:result.newStatus,orderId:ticket.orderId,orderTargetStatus,stage,tableId:ticket.order&&ticket.order.diningTableId,ticketCount:siblingTickets.length,stillCooking:stillCooking.length,siblings:siblingTickets.map((s)=>({id:s.id,status:s.status,lines:s.kotItems.length}))},timestamp:Date.now(),runId:'line-kot-post'})}).catch(()=>{});
-      // #endregion
 
       import("../websockets").then(({ broadcast }) => {
         broadcast("kot.status_updated", { kotTicketId, status: result.newStatus });

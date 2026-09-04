@@ -91,9 +91,6 @@ router.get("/waiters/me/stats", requireAuth, async (req: AuthedRequest, res) => 
       where: waiterShiftOrderWhere(req.auth!.outletId, req.auth!.userId, dayStart),
     });
 
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'W1',location:'waiters.ts:GET me/stats',message:'waiter stats window',data:{dayStart:dayStart.toISOString(),orderCount:orders.length,completed:orders.filter((o)=>o.status==='COMPLETED').length,numbers:orders.map((o)=>o.orderNumber),createdAt:orders.map((o)=>o.createdAt.toISOString()),settledAt:orders.map((o)=>o.settledAt&&o.settledAt.toISOString())},timestamp:Date.now(),runId:'post-fix'})}).catch(()=>{});
-    // #endregion
 
     const tablesServed = new Set(orders.map((o) => o.diningTableId).filter(Boolean)).size;
     const completedOrders = orders.filter((o) => o.status === "COMPLETED");
@@ -162,9 +159,6 @@ router.get("/waiters/me/shift-reconciliation", requireAuth, async (req: AuthedRe
       .filter((p) => p.method === "CASH")
       .reduce((sum, p) => sum + p.amount, 0n);
 
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'W1',location:'waiters.ts:GET shift-reconciliation',message:'waiter recon window',data:{dayStart:dayStart.toISOString(),orderCount:orders.length,paymentHits:myPayments.length,cashSalesMinor:cashSalesMinor.toString(),numbers:orders.map((o)=>o.orderNumber)},timestamp:Date.now(),runId:'post-fix'})}).catch(()=>{});
-    // #endregion
 
     const cardSalesMinor = successfulPayments
       .filter((p) => p.method === "CARD")
@@ -263,9 +257,6 @@ router.post("/waiters/me/shift-handover", requireAuth, async (req: AuthedRequest
         ...payload,
       });
     }).catch(err => console.error('Background task error:', err?.message || err));
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'H1',location:'waiters.ts:POST shift-handover',message:'captain handover saved',data:{handoverId:row.id,businessDate:dayWindow.businessDate,cashSalesMinor:payload.cashSalesMinor,actualCash:payload.actualCashCountedMinor,netTip:payload.netTipPayoutMinor},timestamp:Date.now(),runId:'post-fix'})}).catch(()=>{});
-    // #endregion
     res.status(200).json({ ok: true, ...payload });
   } catch (err: any) {
     console.error("Error recording waiter shift handover:", err);

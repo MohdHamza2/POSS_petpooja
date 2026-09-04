@@ -50,11 +50,6 @@ function deriveKitchenStage(activeOrder: any): "QUEUED" | "COOKING" | "READY" | 
       : kots.some((k: any) => QUEUED_KOT_STATUSES.has(k.status))
         ? "QUEUED"
         : null;
-  // #region agent log
-  if (kots.length > 1 && new Set(statuses).size > 1) {
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'C',location:'tables.ts:deriveKitchenStage',message:'mixed KOT statuses',data:{orderId:activeOrder.id,statuses,stage},timestamp:Date.now(),runId:'wave3'})}).catch(()=>{});
-  }
-  // #endregion
   if (stage) return stage;
   if (
     (kots.some((k: any) => k.status === "SERVED") && kots.every((k: any) => k.status === "SERVED" || k.status === "CANCELLED")) ||
@@ -228,9 +223,6 @@ tablesRouter.get("/tables", requireAuth, async (req: AuthedRequest, res) => {
 
     const printedIds = await orderIdsWithBillPrint(outletId, [...orderMap.values()].map((o: any) => o.id));
 
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'OCC1',location:'tables.ts:GET /tables',message:'floor live map after window',data:{dayStart:floorWindow.dayStart.toISOString(),overnightCookCutoff:floorWindow.overnightCookCutoff.toISOString(),printedCount:printedIds.size,printed:[...printedIds],live:[...orderMap.entries()].map(([tid,o]:any)=> ({tableId:tid,n:o.orderNumber,status:o.status,printed:printedIds.has(o.id),createdAt:o.createdAt,kot:(o.kotTickets||[]).map((k:any)=>k.status)}))},timestamp:Date.now(),runId:'leftover-post'})}).catch(()=>{});
-    // #endregion
 
     const mapped = tables.map((t: any) => {
       const members = t.mergeGroupId ? groupMembers.get(t.mergeGroupId) || [t] : [t];
@@ -391,9 +383,6 @@ tablesRouter.post("/tables/:id/serve", requireAuth, async (req: AuthedRequest, r
     }
 
     const kotsToServe = (activeOrder.kotTickets || []).filter((k: any) => k.status === "READY");
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'S1',location:'tables.ts:POST /serve',message:'waiter serve table',data:{tableId,orderId:activeOrder.id,orderStatus:activeOrder.status,ticketStatuses:(activeOrder.kotTickets||[]).map((k:any)=>k.status),readyCount:kotsToServe.length},timestamp:Date.now(),runId:'waiter-serve'})}).catch(()=>{});
-    // #endregion
     if (kotsToServe.length === 0) {
       return res.status(409).json({ error: "No READY tickets to serve. Wait until kitchen marks food ready." });
     }
@@ -412,9 +401,6 @@ tablesRouter.post("/tables/:id/serve", requireAuth, async (req: AuthedRequest, r
     if (servedItemIds.length > 0) {
       await deductBomStockForOrder(activeOrder.id, outletId, prisma, userId, "TABLE_SERVED", servedItemIds);
     }
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'I',location:'tables.ts:POST /serve',message:'serve-time BOM item ids',data:{tableId,orderId:activeOrder.id,servedKotCount:kotsToServe.length,servedItemIds},timestamp:Date.now(),runId:'serve-bom'})}).catch(()=>{});
-    // #endregion
 
     // Update order status to SERVED only when no queued/cooking tickets remain
     const leftover = (activeOrder.kotTickets || []).filter(
@@ -561,9 +547,6 @@ tablesRouter.get("/tables/occupancy", requireAuth, async (req: AuthedRequest, re
       occupancyRatePercent: s.totalTables > 0 ? Number(((s.occupiedTables / s.totalTables) * 100).toFixed(1)) : 0,
     }));
 
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'OCC2',location:'tables.ts:GET /occupancy',message:'occupancy snapshot',data:{occupiedTables,totalTables,occupancyRatePercent:Number(occupancyRatePercent.toFixed(1)),liveGroupCount:liveGroupIds.size,dayStart:floorWindow.dayStart.toISOString(),occupied:tables.filter((t)=>t.orders.some((ord)=>isLiveFloorSession(ord, floorWindow))||Boolean((t as any).mergeGroupId&&liveGroupIds.has((t as any).mergeGroupId))).map((t)=>({n:t.tableNumber,status:t.status,liveOrders:(t.orders||[]).filter((o:any)=>isLiveFloorSession(o, floorWindow)).map((o:any)=>({num:o.orderNumber,status:o.status,createdAt:o.createdAt,kot:(o.kotTickets||[]).map((k:any)=>k.status)}))}))},timestamp:Date.now(),runId:'occ-post'})}).catch(()=>{});
-    // #endregion
     res.status(200).json({
       outletId,
       totalTables,

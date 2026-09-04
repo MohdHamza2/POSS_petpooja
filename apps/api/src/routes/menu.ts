@@ -306,9 +306,6 @@ router.get("/items/:menuItemId/modifiers", requireAuth, requirePermission("menu.
         };
       })
       .filter(Boolean);
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'D',location:'menu.ts:GET modifiers',message:'item modifiers',data:{menuItemId,groupCount:payload.length,optionCount:options.length},timestamp:Date.now(),runId:'wave3'})}).catch(()=>{});
-    // #endregion
     res.status(200).json(payload);
   } catch (err) {
     console.error(err);
@@ -463,9 +460,6 @@ router.patch("/items/:menuItemId/availability", requireAuth, requirePermission("
     }).catch(err => console.error('Background task error:', err?.message || err));
 
     res.status(200).json({ newVersion, isStocked: nextState !== "OFF" });
-    // #region agent log
-    fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'86A',location:'menu.ts:PATCH availability',message:'item 86 toggle',data:{menuItemId:item.id,nextState,isStocked:nextState!=='OFF',isActive:updated.isActive},timestamp:Date.now(),runId:'pause-86'})}).catch(()=>{});
-    // #endregion
   } catch (err: any) {
     console.error(err);
     res.status(500).json({ error: err.message });
