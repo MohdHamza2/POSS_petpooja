@@ -406,9 +406,10 @@ export async function authedFetch(url: string, options: AuthedFetchOptions = {})
   return res;
 }
 
-export function useAuthGuard(requiredPermission?: string): { me: MeResponse | null; loading: boolean } {
+export function useAuthGuard(requiredPermission?: string): { me: MeResponse | null; loading: boolean; isOffline?: boolean } {
   const [me, setMe] = useState<MeResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isOffline, setIsOffline] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -453,6 +454,7 @@ export function useAuthGuard(requiredPermission?: string): { me: MeResponse | nu
       fetch('http://127.0.0.1:7323/ingest/28c85a32-5ef1-4fe5-9437-78139f7a5bfb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9c675b'},body:JSON.stringify({sessionId:'9c675b',hypothesisId:'K1',location:'auth.ts:useAuthGuard',message:'auth/me failed without wiping session',data:{err:String(err),requiredPermission:requiredPermission||null},timestamp:Date.now(),runId:'cover-0029'})}).catch(()=>{});
       // #endregion
       if (cancelled) return;
+      setIsOffline(true);
       setLoading(false);
     });
 
@@ -462,5 +464,5 @@ export function useAuthGuard(requiredPermission?: string): { me: MeResponse | nu
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [requiredPermission]);
 
-  return { me, loading };
+  return { me, loading, isOffline };
 }

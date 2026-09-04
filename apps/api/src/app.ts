@@ -22,6 +22,7 @@ import { waitersRouter } from './routes/waiters';
 import { tablesRouter } from './routes/tables';
 import { ordersRouter } from './routes/orders';
 import { settingsRouter } from './routes/settings';
+import { healthRouter } from './routes/health';
 
 // Global BigInt JSON serialization support for Express
 // Uses String to prevent precision loss for amounts > 2^53
@@ -38,6 +39,7 @@ export function createApp(): Express {
   app.use(express.json());
 
   // --- Real service routers (top-level prefixes per API_AND_EVENTS_CATALOG.md) ---
+  app.use(healthRouter);
   app.use('/auth', authRouter);
   app.use('/menu', menuRouter);
   app.use('/kitchen', kitchenRouter);

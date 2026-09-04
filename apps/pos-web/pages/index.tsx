@@ -5,9 +5,10 @@ import { useAuthGuard, getSession } from "../lib/auth";
 import PetPoojaHeader from "../components/PetPoojaHeader";
 import TableViewFloor from "../components/TableViewFloor";
 import PosBillingView from "../components/PosBillingView";
+import { OfflineState } from "../components/OfflineState";
 
 export default function POSIndexPage() {
-  const { me, loading: authLoading } = useAuthGuard("order.create");
+  const { me, loading: authLoading, isOffline } = useAuthGuard("order.create");
   const router = useRouter();
 
   const outlet = me?.outlet ?? null;
@@ -47,6 +48,10 @@ export default function POSIndexPage() {
     setSelectedTableId(table.id);
     setViewMode("BILLING");
   };
+
+  if (isOffline) {
+    return <OfflineState onRetry={() => window.location.reload()} />;
+  }
 
   if (authLoading) {
     return (

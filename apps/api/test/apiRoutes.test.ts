@@ -24,4 +24,14 @@ describe('Real API Gateway Routes', () => {
   it('GET /kitchen/stations returns 401 when unauthorized', async () => {
     await request(app).get('/kitchen/stations').expect(401);
   });
+
+  it('GET /health returns 200 ok with db status', async () => {
+    const res = await request(app).get('/health').expect(200);
+    expect(res.body.db).toEqual('UP');
+    expect(res.body.status).toEqual('OK');
+  });
+
+  it('POST /auth/logout returns 401 when unauthorized (no token)', async () => {
+    await request(app).post('/auth/logout').expect(401);
+  });
 });
