@@ -67,59 +67,34 @@ async function runDynamicSeed(filePath?: string) {
     where: { id: "00000000-0000-0000-0000-000000000000" },
     update: {
       name: data.organization.name,
-      taxNumber: data.organization.taxNumber,
+      tax_id: data.organization.taxNumber,
     },
     create: {
       id: "00000000-0000-0000-0000-000000000000",
       name: data.organization.name,
-      taxNumber: data.organization.taxNumber,
+      tax_id: data.organization.taxNumber,
     },
   });
   console.log(`✓ Organization: ${org.name}`);
 
   // 2. Outlet
   const outlet = await prisma.outlet.upsert({
-    where: { code: data.outlet.code },
+    where: { organizationId_code: { organizationId: org.id, code: data.outlet.code } },
     update: {
       name: data.outlet.name,
-      address: data.outlet.address,
       timezone: data.outlet.timezone || "Asia/Kolkata",
       currency: data.outlet.currency || "INR",
-      dayStartTime: data.outlet.dayStartTime || "06:00",
     },
     create: {
       organizationId: org.id,
       name: data.outlet.name,
       code: data.outlet.code,
-      address: data.outlet.address,
       timezone: data.outlet.timezone || "Asia/Kolkata",
       currency: data.outlet.currency || "INR",
-      dayStartTime: data.outlet.dayStartTime || "06:00",
     },
   });
   console.log(`✓ Outlet: ${outlet.name} (${outlet.code})`);
 
-  // 3. Terminals
-  if (data.terminals) {
-    for (const term of data.terminals) {
-      await prisma.terminal.upsert({
-        where: {
-          outletId_terminalNumber: {
-            outletId: outlet.id,
-            terminalNumber: term.terminalNumber,
-          },
-        },
-        update: { name: term.name },
-        create: {
-          outletId: outlet.id,
-          name: term.name,
-          terminalNumber: term.terminalNumber,
-          isActive: true,
-        },
-      });
-      console.log(`  - Terminal: [${term.terminalNumber}] ${term.name}`);
-    }
-  }
 
   // 4. Dining Tables
   if (data.diningTables) {
@@ -196,24 +171,27 @@ async function runDynamicSeed(filePath?: string) {
       });
 
       const roleObj = await prisma.role.findUnique({
-        where: { name: u.role },
+        where: { code: u.role },
       });
 
       if (roleObj) {
-        await prisma.userRole.upsert({
-          where: {
-            userId_roleId: {
+        const existingRole = await prisma.userRole.findFirst({
+          where: { userId: user.id, roleId: roleObj.id }
+        });
+        if (existingRole) {
+          await prisma.userRole.update({
+            where: { id: existingRole.id },
+            data: { outletId: outlet.id }
+          });
+        } else {
+          await prisma.userRole.create({
+            data: {
               userId: user.id,
               roleId: roleObj.id,
+              outletId: outlet.id,
             },
-          },
-          update: { outletId: outlet.id },
-          create: {
-            userId: user.id,
-            roleId: roleObj.id,
-            outletId: outlet.id,
-          },
-        });
+          });
+        }
         console.log(`  - User: ${user.email} (Role: ${u.role}, PIN: ${u.pin || "N/A"})`);
       }
     }
@@ -276,7 +254,7 @@ async function runDynamicSeed(filePath?: string) {
           data: {
             categoryId: catId,
             description: item.description,
-            price: BigInt(item.pricePaise),
+            price: Number(item.pricePaise) / 100,
             isVeg: item.isVeg ?? true,
             taxRate: item.taxRate ?? 5.0,
           },
@@ -289,7 +267,7 @@ async function runDynamicSeed(filePath?: string) {
             categoryId: catId,
             name: item.name,
             description: item.description,
-            price: BigInt(item.pricePaise),
+            price: Number(item.pricePaise) / 100,
             isVeg: item.isVeg ?? true,
             taxRate: item.taxRate ?? 5.0,
             isActive: true,
@@ -298,22 +276,22 @@ async function runDynamicSeed(filePath?: string) {
         menuItemId = created.id;
       }
 
-      await prisma.itemAvailability.upsert({
+      await prisma.item_availability.upsert({
         where: {
-          outletId_menuItemId: {
-            outletId: outlet.id,
-            menuItemId,
+          outlet_id_menu_item_id: {
+            outlet_id: outlet.id,
+            menu_item_id: menuItemId,
           },
         },
         update: {
-          stockQty: item.stockQty ?? 50,
-          isStocked: true,
+          stock_qty: item.stockQty ?? 50,
+          is_stocked: true,
         },
         create: {
-          outletId: outlet.id,
-          menuItemId,
-          stockQty: item.stockQty ?? 50,
-          isStocked: true,
+          outlet_id: outlet.id,
+          menu_item_id: menuItemId,
+          stock_qty: item.stockQty ?? 50,
+          is_stocked: true,
           version: 1,
         },
       });
@@ -324,29 +302,29 @@ async function runDynamicSeed(filePath?: string) {
   // 9. Ingredients
   if (data.ingredients) {
     for (const ing of data.ingredients) {
-      const existing = await prisma.ingredient.findFirst({
-        where: { outletId: outlet.id, name: ing.name },
+      const existing = await prisma.ingredients.findFirst({
+        where: { outlet_id: outlet.id, name: ing.name },
       });
       if (existing) {
-        await prisma.ingredient.update({
+        await prisma.ingredients.update({
           where: { id: existing.id },
           data: {
-            unitOfMeasure: ing.unitOfMeasure,
-            currentStock: ing.currentStock,
-            reorderLevel: ing.reorderLevel,
-            unitCost: BigInt(ing.unitCostPaise),
+            unit_of_measure: ing.unitOfMeasure,
+            current_stock: ing.currentStock,
+            reorder_level: ing.reorderLevel,
+            unit_cost_minor: BigInt(ing.unitCostPaise),
           },
         });
       } else {
-        await prisma.ingredient.create({
+        await prisma.ingredients.create({
           data: {
-            outletId: outlet.id,
+            outlet_id: outlet.id,
             name: ing.name,
-            unitOfMeasure: ing.unitOfMeasure,
-            currentStock: ing.currentStock,
-            reorderLevel: ing.reorderLevel,
-            unitCost: BigInt(ing.unitCostPaise),
-            isActive: true,
+            unit_of_measure: ing.unitOfMeasure,
+            current_stock: ing.currentStock,
+            reorder_level: ing.reorderLevel,
+            unit_cost_minor: BigInt(ing.unitCostPaise),
+            is_active: true,
           },
         });
       }
