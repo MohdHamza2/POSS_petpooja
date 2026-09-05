@@ -139,6 +139,7 @@ export default function FinancePage() {
   const [reconcileActualCount, setReconcileActualCount] = useState("");
   const [reconcileNotes, setReconcileNotes] = useState("");
   const [savingOpenShift, setSavingOpenShift] = useState(false);
+  const [savingReconcile, setSavingReconcile] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [waiterHandovers, setWaiterHandovers] = useState<
     { id: string; waiterId: string; waiterName?: string; createdAt: string; actualCashCountedMinor: number; openingFloatMinor: number; netTipPayoutMinor: number; managerNotes: string }[]
