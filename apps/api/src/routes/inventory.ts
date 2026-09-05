@@ -487,53 +487,58 @@ inventoryRouter.post("/purchase-orders", requireAuth, requirePermission("invento
     const outletId = req.auth!.outletId;
     const userId = req.auth!.userId;
 
-    // Generate PO number
-    const count = await (prisma as any).purchase_orders.count({
-      where: { outlet_id: outletId },
-    });
-    const poNumber = `PO-${String(count + 1).padStart(6, "0")}`;
+    const result = await prisma.$transaction(async (tx: any) => {
+      const counter = await tx.counter.upsert({
+        where: { outletId_type: { outletId, type: "PURCHASE_ORDER" } },
+        update: { value: { increment: 1 } },
+        create: { outletId, type: "PURCHASE_ORDER", value: 1 },
+      });
+      const poNumber = `PO-${String(counter.value).padStart(6, "0")}`;
 
-    const total = items.reduce((sum: number, it: any) => sum + Number(it.unitPrice || 0) * Number(it.quantity || 0), 0);
+      const total = items.reduce((sum: number, it: any) => sum + Number(it.unitPrice || 0) * Number(it.quantity || 0), 0);
 
-    const po = await (prisma as any).purchase_orders.create({
-      data: {
-        outlet_id: outletId,
-        vendor_id: vendorId,
-        po_number: poNumber,
-        total_amount_minor: Math.round(total * 100),
-        status: "DRAFT",
-        created_by: userId,
-        updated_by: userId,
-      },
-    });
-
-    for (const item of items) {
-      const unitPriceMinor = Math.round(Number(item.unitPrice) * 100);
-      const qty = Number(item.quantity);
-      await (prisma as any).purchase_order_items.create({
+      const po = await tx.purchase_orders.create({
         data: {
-          po_id: po.id,
-          ingredient_id: item.ingredientId,
-          quantity: qty,
-          unit_price_minor: unitPriceMinor,
-          total_minor: unitPriceMinor * qty,
+          outlet_id: outletId,
+          vendor_id: vendorId,
+          po_number: poNumber,
+          total_amount_minor: Math.round(total * 100),
+          status: "DRAFT",
+          created_by: userId,
+          updated_by: userId,
         },
       });
-    }
 
-    await prisma.auditLog.create({
-      data: {
-        outletId,
-        actor_id: userId,
-        action: "CREATE",
-        entityType: "INVENTORY_PURCHASE_ORDER",
-        entityId: po.id,
-        afterState: { vendorId, items, totalAmount: total, status: "DRAFT" },
-        createdAt: new Date(),
-      },
+      for (const item of items) {
+        const unitPriceMinor = Math.round(Number(item.unitPrice) * 100);
+        const qty = Number(item.quantity);
+        await tx.purchase_order_items.create({
+          data: {
+            po_id: po.id,
+            ingredient_id: item.ingredientId,
+            quantity: qty,
+            unit_price_minor: unitPriceMinor,
+            total_minor: unitPriceMinor * qty,
+          },
+        });
+      }
+
+      await tx.auditLog.create({
+        data: {
+          outletId,
+          actor_id: userId,
+          action: "CREATE",
+          entityType: "INVENTORY_PURCHASE_ORDER",
+          entityId: po.id,
+          afterState: { vendorId, items, totalAmount: total, status: "DRAFT" },
+          createdAt: new Date(),
+        },
+      });
+
+      return { id: po.id, poNumber, vendorId, items, totalAmount: total, status: "DRAFT" };
     });
 
-    res.status(201).json({ id: po.id, poNumber, vendorId, items, totalAmount: total, status: "DRAFT" });
+    res.status(201).json(result);
   } catch (error: any) {
     console.error("Error creating purchase order:", error);
     res.status(500).json({ error: error.message });

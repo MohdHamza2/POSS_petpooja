@@ -400,32 +400,37 @@ financeRouter.post("/petty-cash", requireAuth, requirePermission("finance.write"
     }
 
     const amount = BigInt(amountMinor);
-    const session = await prisma.cash_drawer_sessions.findFirst({
-      where: { outlet_id: outletId, status: "OPEN" },
-      orderBy: { opened_at: "desc" },
-    });
+    
+    const result = await prisma.$transaction(async (tx: any) => {
+      const session = await tx.cash_drawer_sessions.findFirst({
+        where: { outlet_id: outletId, status: "OPEN" },
+        orderBy: { opened_at: "desc" },
+      });
 
-    const row = await prisma.petty_cash_ledger.create({
-      data: {
-        outlet_id: outletId,
-        amount_minor: amount,
-        category: category.trim(),
-        description: (description || "").trim(),
-        paid_to: (paidTo || "").trim() || null,
-        recorded_by: userId,
-        cash_drawer_session_id: session?.id || null,
-      },
-    });
-
-    if (session) {
-      await prisma.cash_drawer_sessions.update({
-        where: { id: session.id },
+      const row = await tx.petty_cash_ledger.create({
         data: {
-          expected_close_balance_minor: { decrement: amount },
-          updated_at: new Date(),
+          outlet_id: outletId,
+          amount_minor: amount,
+          category: category.trim(),
+          description: (description || "").trim(),
+          paid_to: (paidTo || "").trim() || null,
+          recorded_by: userId,
+          cash_drawer_session_id: session?.id || null,
         },
       });
-    }
+
+      if (session) {
+        await tx.cash_drawer_sessions.update({
+          where: { id: session.id },
+          data: {
+            expected_close_balance_minor: { decrement: amount },
+            updated_at: new Date(),
+          },
+        });
+      }
+      return { row, session };
+    });
+    const { row, session } = result;
 
     const user = await prisma.user.findUnique({ where: { id: userId } });
     import("../websockets").then(({ broadcast }) => {
@@ -502,52 +507,63 @@ const handleReconcileShift = async (req: AuthedRequest, res: any) => {
       return;
     }
 
-    const session = await prisma.cash_drawer_sessions.findFirst({
-      where: { outlet_id: outletId, status: "OPEN" },
-      orderBy: { opened_at: "desc" },
-    });
-    if (!session) {
-      res.status(409).json({ error: "No open cash drawer session" });
-      return;
-    }
-
     const actualCounted = BigInt(counted);
     const { start: startOfDay, end: endOfDay } = await outletBusinessDayWindow(outletId);
-    const cashToday = await prisma.payment.findMany({
-      where: { outletId, method: "CASH", status: "CAPTURED", createdAt: { gte: startOfDay, lt: endOfDay } },
-    });
-    const cashSalesMinor = cashToday.reduce((sum, p) => sum + p.amount, 0n);
-    const pettyToday = await prisma.petty_cash_ledger.aggregate({
-      where: { outlet_id: outletId, created_at: { gte: startOfDay, lt: endOfDay } },
-      _sum: { amount_minor: true },
-    });
-    const expectedCashMinor =
-      session.opening_balance_minor + cashSalesMinor - (pettyToday._sum.amount_minor ?? 0n);
-    const varianceMinor = actualCounted - expectedCashMinor;
 
-    const closed = await prisma.cash_drawer_sessions.update({
-      where: { id: session.id },
-      data: {
-        status: "CLOSED",
-        closed_by: userId,
-        closed_at: new Date(),
-        actual_close_balance_minor: actualCounted,
-        discrepancy_minor: varianceMinor,
-        notes: (req.body.notes || req.body.managerNotes || session.notes || "").trim(),
-        updated_at: new Date(),
-      },
+    const result = await prisma.$transaction(async (tx: any) => {
+      const session = await tx.cash_drawer_sessions.findFirst({
+        where: { outlet_id: outletId, status: "OPEN" },
+        orderBy: { opened_at: "desc" },
+      });
+      if (!session) {
+        throw new Error("No open cash drawer session");
+      }
+
+      const cashToday = await tx.payment.findMany({
+        where: { outletId, method: "CASH", status: "CAPTURED", createdAt: { gte: startOfDay, lt: endOfDay } },
+      });
+      const cashSalesMinor = cashToday.reduce((sum: bigint, p: any) => sum + p.amount, 0n);
+      const pettyToday = await tx.petty_cash_ledger.aggregate({
+        where: { outlet_id: outletId, created_at: { gte: startOfDay, lt: endOfDay } },
+        _sum: { amount_minor: true },
+      });
+      const expectedCashMinor =
+        session.opening_balance_minor + cashSalesMinor - (pettyToday._sum.amount_minor ?? 0n);
+      const varianceMinor = actualCounted - expectedCashMinor;
+
+      const closed = await tx.cash_drawer_sessions.updateMany({
+        where: { id: session.id, status: "OPEN" },
+        data: {
+          status: "CLOSED",
+          closed_by: userId,
+          closed_at: new Date(),
+          actual_close_balance_minor: actualCounted,
+          discrepancy_minor: varianceMinor,
+          notes: (req.body.notes || req.body.managerNotes || session.notes || "").trim(),
+          updated_at: new Date(),
+        },
+      });
+
+      if (closed.count === 0) {
+        throw new Error("No open cash drawer session");
+      }
+
+      return { id: session.id, expectedCashMinor, varianceMinor };
     });
 
     res.status(200).json({
       success: true,
-      id: closed.id,
-      expectedCashMinor: expectedCashMinor.toString(),
+      id: result.id,
+      expectedCashMinor: result.expectedCashMinor.toString(),
       actualCashCountedMinor: actualCounted.toString(),
-      varianceMinor: varianceMinor.toString(),
+      varianceMinor: result.varianceMinor.toString(),
       isReconciled: true,
     });
   } catch (error: any) {
     console.error("Error in reconcile shift:", error);
+    if (error.message === "No open cash drawer session") {
+      return res.status(409).json({ error: error.message });
+    }
     res.status(500).json({ error: error.message });
   }
 };
